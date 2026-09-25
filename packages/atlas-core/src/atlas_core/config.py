@@ -81,11 +81,45 @@ class AsrSection(BaseModel):
 
 
 class TtsSection(BaseModel):
-    darija_engine: str = "darija_tts_sidecar"
+    """The mouth (L3).  Every field here is one the user may legitimately want.
+
+    `darija_engine = "piper_arabic"` is the fully-offline setting (no sidecar,
+    no extra process); `sapi` exists for the first run on a Windows box that has
+    no models yet.
+    """
+
+    darija_engine: str = "darija_tts_sidecar"  # piper_arabic | darija_tts_sidecar | sapi
     english_engine: str = "piper"
     english_voice: str = "en_GB-alan-medium"
+    darija_voice: str = "darija"
+    #: Piper voices live here as `<voice>.onnx` + `<voice>.onnx.json`.
+    models_dir: str = "models/tts"
+    #: The offline Darija bootstrap: a Piper Arabic voice, wrong accent but local.
+    arabic_voice: str = "ar_JO-kareem-medium"
+    #: Optional Windows voice name for the last-resort engine.
+    sapi_voice: str = ""
+    cache_path: str = "data/tts-cache.sqlite3"
     cache_max_mb: int = 300
     realtime_streaming: bool = True
+    #: Speak at most this many sentences before offering to continue.  A wall of
+    #: speech is worse than a short answer; 0 disables the cap.
+    max_sentences: int = 3
+    ask_to_continue: bool = True
+    prosody: bool = True
+    quiet_hours: list[str] = Field(default_factory=lambda: ["22:30", "07:00"])
+    gain: float = 1.0
+    #: Voice barge-in needs echo cancellation this laptop does not have; the stop
+    #: hotkey always works, and stop words work when this is on.
+    barge_in: bool = False
+    stop_words: list[str] = Field(default_factory=lambda: ["stop", "safi", "skut"])
+    #: Seconds of audio held ahead of playback.  Two sentences is the RAM budget.
+    prefetch: int = 2
+    #: The Darija voice runs in its own venv; these describe that process.
+    sidecar_url: str = "http://127.0.0.1:8125"
+    sidecar_python: str = "vendor/darija-tts/.venv/Scripts/python.exe"
+    sidecar_command: list[str] = Field(default_factory=list)
+    sidecar_timeout_s: float = 30.0
+    sidecar_autostart: bool = True
 
 
 class DialectSection(BaseModel):

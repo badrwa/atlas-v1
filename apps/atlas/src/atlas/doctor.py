@@ -261,13 +261,78 @@ def check_ears(report: Report, config: AppConfig | None) -> None:
     except ImportError:  # pragma: no cover - atlas-audio is imported above
         pass
 
-    report.add(
-        "privacy",
-        OK if config is not None and getattr(config.asr, "cloud_audio", True) else WARN,
-        "audio may go to the cloud after the wake word"
-        if config is not None and getattr(config.asr, "cloud_audio", True)
-        else "cloud audio off — nothing leaves this machine",
-    )
+
+def check_voice(report: Report, config: AppConfig | None) -> None:
+    """The L3 rows: what would speak, and whether it can speak right now."""
+    try:
+        from atlas_audio import TtsCache, build_synthesizer, voice_problems
+    except ImportError:
+        report.add("voice", WARN, "atlas-audio not installed")
+        return
+
+    for language, label in (("ar-MA", "darija"), ("en-GB", "english")):
+        try:
+            engine = build_synthesizer(config, language=language)
+        except Exception as exc:
+            report.add(f"voice · {label}", WARN, f"could not build a voice: {exc}")
+            continue
+        if engine is None:
+            report.add(
+                f"voice · {label}",
+                WARN,
+                "no engine at all",
+                "run `atlas voice` for the install lines",
+            )
+            continue
+        problems = voice_problems(config, language=language)
+        if problems:
+            report.add(f"voice · {label}", WARN, f"{engine.name} (with fallbacks)", problems[0])
+        else:
+            report.add(f"voice · {label}", OK, engine.name)
+
+    try:
+        from atlas_audio.playback import SoundDeviceWriter
+
+        if SoundDeviceWriter.available():
+            report.add("speakers", OK, "sounddevice ready — half duplex while Atlas speaks")
+        else:
+            report.add(
+                "speakers",
+                WARN,
+                "no output stream — captions only",
+                "pip install 'atlas-audio[audio]'",
+            )
+    except ImportError:  # pragma: no cover - atlas-audio imported above
+        pass
+
+    if config is not None:
+        try:
+            stats = TtsCache(config.tts.cache_path, max_mb=config.tts.cache_max_mb).stats()
+            report.add(
+                "tts cache",
+                OK,
+                f"{stats.entries} clips · {stats.bytes / 1e6:.1f}/{config.tts.cache_max_mb} MB",
+            )
+        except Exception as exc:
+            report.add("tts cache", WARN, f"unavailable: {exc}")
+
+
+def check_privacy(report: Report, config: AppConfig | None) -> None:
+    """One row that answers the question the user actually has: what leaves?
+
+    Only one thing leaves the machine in L3 — the utterance audio, and only after
+    the wake word, and only when `cloud_audio` is on. Speech *out* is always
+    local: Piper, the sidecar and SAPI all run here.
+    """
+    cloud_audio = bool(getattr(getattr(config, "asr", None), "cloud_audio", True))
+    if cloud_audio:
+        report.add(
+            "privacy",
+            WARN,
+            "your utterance goes to the cloud after the wake word; speech out stays local",
+        )
+    else:
+        report.add("privacy", OK, "cloud audio off — your voice never leaves this machine")
 
 
 def _module_present(name: str) -> bool:
@@ -333,6 +398,8 @@ def run_checks(*, config_path: str | None = None) -> Report:
     check_vault(report, config)
     check_audio(report)
     check_ears(report, config)
+    check_voice(report, config)
+    check_privacy(report, config)
     check_workspace(report, config)
     check_environment(report)
     return report

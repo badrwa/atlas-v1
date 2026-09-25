@@ -5,6 +5,16 @@
 
 ---
 
+> **Implementation notes: [`NOTES-L03.md`](NOTES-L03.md)** — what was built, the
+> measurements, the seven bugs the tests caught, and the laptop command sequence.
+> Implemented: `speech.py` (splitter + streaming pipeline + `Mouth`), `tts.py`
+> (Piper, the Darija sidecar, SAPI, the fallback policy), `cache.py`, `prosody.py`,
+> `playback.py`, `vendor/darija-tts/server.py`, `scripts/bench_tts.py`,
+> `scripts/spike_darija_tts.py`, `atlas say` / `atlas voice`.
+> **Pitch is deliberately absent** from `Prosody` — Piper and OuteTTS have no
+> pitch control, so the table's pitch column became `expressiveness` (see §3 of
+> the notes). The Darija spike and every latency/RAM number still need the laptop.
+
 ## Deliverables
 
 - `SpeechSynthesizer` implementations: `PiperEnGbSynthesizer`, `PiperDarijaSynthesizer` (bootstrap), `DarijaTtsSidecarSynthesizer` (the real Darija voice), `SapiFallbackSynthesizer`.

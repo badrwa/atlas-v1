@@ -170,6 +170,7 @@ class VoiceLoop:
         self.state = LoopState.IDLE
         self.turns: list[Turn] = []
         self.mic_muted = False
+        self._mute_depth = 0
         self.frames_seen = 0
         self.wake_hits = 0
         self.frames_dropped_after_wake = 0
@@ -199,11 +200,21 @@ class VoiceLoop:
         }
 
     def mute(self) -> None:
-        """Half duplex: no frames are acted on while Atlas is speaking."""
-        self.mic_muted = True
+        """Half duplex: no frames are acted on while Atlas is speaking.
+
+        Reference counted, because two things now close the microphone at
+        overlapping times — the reply itself, and the mouth's `MicGate` around
+        playback.  A plain boolean would let whichever finished first reopen the
+        mic while the other was still making noise, which is the exact bug that
+        makes an assistant answer itself.
+        """
+        self._mute_depth += 1
+        self.mic_muted = self._mute_depth > 0
 
     def unmute(self) -> None:
-        self.mic_muted = False
+        """Release one hold; the mic opens when the last one is gone."""
+        self._mute_depth = max(0, self._mute_depth - 1)
+        self.mic_muted = self._mute_depth > 0
 
     # ── one frame at a time ──────────────────────────────────────────
     async def feed(self, packet: FramePacket) -> Turn | None:

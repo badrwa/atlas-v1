@@ -21,7 +21,7 @@ Speaks **Moroccan Darija** by default and **British English** second · knows yo
 | L0 | Foundation (workspace, contracts, DI, events, FSM, CI) | **done — see [NOTES-L00](docs/levels/NOTES-L00.md)** |
 | L1 | Brain (text Darija + en-GB, providers, persona, timings) | **done — see [NOTES-L01](docs/levels/NOTES-L01.md)** |
 | L2 | Ears (wake word, VAD, ASR cloud + local Darija) | **done — see [NOTES-L02](docs/levels/NOTES-L02.md)** |
-| L3 | Mouth (Piper en-GB, DarijaTTS, cache, prosody) | not started |
+| L3 | Mouth (Piper en-GB, DarijaTTS, cache, prosody) | **done — see [NOTES-L03](docs/levels/NOTES-L03.md)** |
 | L4 | Identity (voice enrolment, verification, restricted mode) | not started |
 | L5 | Face (orb UI, captions, tray, hotkeys) | not started |
 | L6 | Second brain (Obsidian vault, FTS5, git journal, MCP) | not started |
@@ -41,9 +41,15 @@ python -m atlas chat --structured   # also get language/emotion metadata per tur
 
 python -m atlas audio devices   # is there a microphone, and can Python see it
 python -m atlas audio test      # record one second and play it back
-python -m atlas listen --status # wake engine, VAD backend, ASR mode, input devices
-python -m atlas listen          # say "atlas" and speak
+python -m atlas listen --status # wake engine, VAD backend, ASR mode, voice chain
+python -m atlas listen          # say "atlas" and speak — Atlas answers out loud
 python -m atlas listen --ptt    # push-to-talk: press Enter, talk, press Enter
+python -m atlas listen --no-voice   # the same, captions only
+
+python -m atlas voice           # which voice would speak, and what it still needs
+python -m atlas voice warm      # cache the lines Atlas repeats (greetings, "safi")
+python -m atlas say "Salam, ana Atlas" --language ar-MA      # speak one line
+python -m atlas say "Right." --out out.wav --language en-GB  # or write a WAV
 ```
 
 Inside `chat`: `/lang en-GB` switches language, `/provider groq` pins a brain,
@@ -60,10 +66,23 @@ A fresh clone with no keys still runs: `doctor` reports what is missing, and
 work before its level lands: `atlas listen --status` names the wake engine it
 will actually use, the VAD backend, and whether any cloud key is present.
 
-The ears need two optional extras, and say so rather than failing:
+The ears and the mouth need optional extras, and say so rather than failing:
 
 ```bash
-pip install -e "packages/atlas-audio[audio]"   # sounddevice + numpy: a microphone at all
+pip install -e "packages/atlas-audio[audio]"   # sounddevice + numpy: microphone and speakers
+pip install -e "packages/atlas-audio[local]"   # sherpa-onnx (wake + VAD), faster-whisper, piper
+pip install -e "packages/atlas-audio[all]"     # everything above, plus the hotkey extra
+```
+
+The British voice is a 63 MB ONNX file — download `en_GB-alan-medium.onnx` (+
+`.onnx.json`) from [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices)
+into `models/tts/`. The Darija voice is a separate process in its own venv
+(`vendor/darija-tts/`, ~550 MB model) because the open Darija TTS needs an
+inference stack Atlas refuses to import; until it is installed, Piper-Arabic
+speaks Darija and the chain says so. `atlas voice` prints exactly what is missing.
+
+Half duplex is not a setting: the microphone is closed (reference counted) for as
+long as any audio is playing, so Atlas cannot hear itself.   # sounddevice + numpy: a microphone at all
 pip install -e "packages/atlas-audio[local]"   # sherpa-onnx (wake + VAD) and faster-whisper
 ```
 
@@ -74,8 +93,15 @@ chat), the vault writer (`atlas-obsidian`: git-journaled, undoable), the skill
 registry with an owner gate, and the CLI. The brain holds a Darija-first
 conversation, switches to British English on request, answers with one honest
 sentence when the network is gone, and keeps its own per-turn overhead at 0.2 ms
-— so the only thing a user waits for is the model. 267 tests, ruff + mypy +
-duplicate-code and architecture checks in CI.
+— so the only thing a user waits for is the model.
+
+The ears (`atlas-audio`: frames, Silero VAD, sherpa-onnx wake word, cloud-first
+ASR with a faster-whisper Darija fallback) and the mouth (Piper en-GB + Arabic,
+the Darija sidecar, a SQLite TTS cache, mood-driven prosody, sentence streaming,
+half-duplex playback) are on top of that. Streaming means the first word arrives
+after one sentence is written, not after the whole answer: `atlas listen` speaks
+while the model is still typing. 472 tests, ruff + mypy + duplicate-code and
+architecture checks in CI.
 
 ## Ground rules
 

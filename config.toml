@@ -45,11 +45,29 @@ lexicon_path = "data/lexicon.md"        # your corrections; also the ASR hotword
 cloud_audio = true            # false = no audio leaves this machine, ever
 
 [tts]
-darija_engine = "darija_tts_sidecar"    # piper_arabic | darija_tts_sidecar | sapi
-english_engine = "piper"
-english_voice = "en_GB-alan-medium"
+darija_engine = "darija_tts_sidecar"    # darija_tts_sidecar | piper_arabic | sapi
+english_engine = "piper"                # piper | sapi
+english_voice = "en_GB-alan-medium"     # any en_GB voice in models_dir
+darija_voice = "darija"
+models_dir = "models/tts"
+arabic_voice = "ar_JO-kareem-medium"    # the offline bootstrap for Darija
+sapi_voice = ""                         # e.g. "Microsoft Hazel Desktop"
+cache_path = "data/tts-cache.sqlite3"
 cache_max_mb = 300
 realtime_streaming = true
+max_sentences = 3                       # then Atlas asks "bghiti nkemmel?"
+ask_to_continue = true
+prosody = true
+quiet_hours = ["22:30", "07:00"]        # softer, quieter after this hour
+gain = 1.0
+barge_in = false                        # stop words need echo cancellation; off — the stop hotkey (Ctrl+Alt+S) always works
+stop_words = ["stop", "safi", "skut"]
+prefetch = 2                            # sentences held ahead of playback
+sidecar_url = "http://127.0.0.1:8125"
+sidecar_python = "vendor/darija-tts/.venv/Scripts/python.exe"
+#sidecar_command = ["{python}", "-m", "darija_tts.server", "--port", "8125"]
+sidecar_timeout_s = 30.0
+sidecar_autostart = true
 
 [mind]
 provider_order = ["gemini", "groq", "openrouter", "together", "huggingface", "ollama", "llamacpp"]

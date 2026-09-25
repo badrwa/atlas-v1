@@ -52,15 +52,40 @@ class WavFile:
     def read(cls, path: str | Path) -> WavFile:
         """Read any PCM WAV, converting to 16 kHz mono on the way in."""
         with wave.open(str(path), "rb") as handle:
-            channels = handle.getnchannels()
-            width = handle.getsampwidth()
-            rate = handle.getframerate()
-            raw = handle.readframes(handle.getnframes())
+            return cls._decode(handle, label=str(path))
+
+    @classmethod
+    def read_bytes(cls, data: bytes, *, label: str = "<bytes>") -> WavFile:
+        """Same decoder, from memory — and *without* forcing 16 kHz.
+
+        A TTS engine writes at its own rate (Piper: 22 050 Hz); pretending the
+        audio is 16 kHz here would play a chipmunk, so the returned rate is the
+        file's own.  Whoever plays it converts once, at the end (`AudioPlayer`).
+        """
+        import io
+
+        with wave.open(io.BytesIO(data), "rb") as handle:
+            return cls._decode(handle, label=label, keep_rate=True)
+
+    @classmethod
+    def _decode(cls, handle: wave.Wave_read, *, label: str, keep_rate: bool = False) -> WavFile:
+        """One WAV decoder for both entry points."""
+        channels = handle.getnchannels()
+        width = handle.getsampwidth()
+        rate = handle.getframerate()
+        raw = handle.readframes(handle.getnframes())
 
         if width != 2:
-            raise ValueError(f"{path}: only 16-bit PCM is supported (got {width * 8}-bit)")
+            raise ValueError(f"{label}: only 16-bit PCM is supported (got {width * 8}-bit)")
         samples = array("h")
         samples.frombytes(raw)
+
+        if keep_rate:
+            if channels > 1:
+                # Downmix only: `source_rate=SAMPLE_RATE` makes `resample_pcm`
+                # stop after the channel average, keeping the file's own rate.
+                samples = resample_pcm(samples, channels=channels, source_rate=SAMPLE_RATE)
+            return cls(samples=samples, sample_rate=rate)
 
         if channels > 1 or rate != SAMPLE_RATE:
             # One pass over the whole buffer: per-chunk resampling would stretch

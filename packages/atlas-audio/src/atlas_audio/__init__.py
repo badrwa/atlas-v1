@@ -1,4 +1,4 @@
-"""Atlas audio — the ears.
+"""Atlas audio — the ears and the mouth.
 
 Layering, bottom to top:
 
@@ -11,7 +11,12 @@ Layering, bottom to top:
 * `postprocess` — language detection, dictation numbers, the owner-editable lexicon
 * `loop`        — the FSM-driven turn: wake → listen → transcribe → reply → follow-up
 * `ptt`         — push-to-talk, terminal or hotkey, for when "atlas" is not polite
-* `engines`     — the L3/L4 slots that are still deliberately unimplemented
+* `prosody`     — mood → rate/energy/expressiveness, with pitch deliberately absent
+* `cache`       — SQLite LRU of synthesised clips, keyed by text+voice+rate+engine
+* `tts`         — the voices: Piper (en-GB + Arabic), the Darija sidecar, SAPI
+* `playback`    — PCM to the sound card, fades, metering, and the half-duplex gate
+* `speech`      — sentence streaming and `Mouth`, the one object that speaks
+* `engines`     — the L4 slot that is still deliberately unimplemented
 
 Nothing here needs a microphone to be tested: every engine takes an injected
 reader, detector or model factory, so the whole level runs from WAV files.
@@ -26,6 +31,12 @@ from atlas_audio.asr import (
     SherpaOfflineRecognizer,
     build_recognizers,
     wav_header,
+)
+from atlas_audio.cache import (
+    CachedClip,
+    CacheStats,
+    TtsCache,
+    cache_key,
 )
 from atlas_audio.capture import (
     RecordedTurn,
@@ -48,7 +59,7 @@ from atlas_audio.devices import (
     list_devices,
     pick_device,
 )
-from atlas_audio.engines import DarijaTtsSidecar, PiperSynthesizer, SherpaSpeakerVerifier
+from atlas_audio.engines import SherpaSpeakerVerifier
 from atlas_audio.frames import (
     FRAME_BYTES,
     FRAME_MS,
@@ -70,6 +81,15 @@ from atlas_audio.frames import (
     to_numpy,
 )
 from atlas_audio.loop import LoopConfig, LoopState, Turn, VoiceLoop
+from atlas_audio.playback import (
+    AudioPlayer,
+    DuckingController,
+    MicGate,
+    NullWriter,
+    PlaybackResult,
+    SoundDeviceWriter,
+    peak_level,
+)
 from atlas_audio.postprocess import (
     AsrPostProcessor,
     detect_language,
@@ -80,7 +100,33 @@ from atlas_audio.postprocess import (
     number_to_words,
     save_lexicon,
 )
+from atlas_audio.prosody import CALM, Prosody, ProsodyDirector, in_quiet_hours
 from atlas_audio.ptt import HOTKEYS, HotkeyListener, PushToTalk
+from atlas_audio.speech import (
+    CANNED_LINES,
+    InterruptPolicy,
+    Mouth,
+    MouthConfig,
+    SentenceSplitter,
+    SentenceStreamer,
+    SpokenSentence,
+)
+from atlas_audio.tts import (
+    DarijaTtsSidecarSynthesizer,
+    PiperSynthesizer,
+    SapiSynthesizer,
+    SidecarConfig,
+    SidecarProcess,
+    VoiceConfig,
+    VoiceSynthesizer,
+    build_synthesizer,
+    build_voice_chain,
+    engine_ready,
+    http_health,
+    tts_status,
+    voice_problems,
+    wav_bytes,
+)
 from atlas_audio.vad import (
     EnergyVad,
     SegmenterConfig,
@@ -100,6 +146,8 @@ from atlas_audio.wake import (
 )
 
 __all__ = [
+    "CALM",
+    "CANNED_LINES",
     "FRAME_BYTES",
     "FRAME_MS",
     "FRAME_SAMPLES",
@@ -107,10 +155,14 @@ __all__ = [
     "SAMPLE_RATE",
     "AsrAttempt",
     "AsrPostProcessor",
+    "AudioPlayer",
     "AudioStackReport",
+    "CacheStats",
+    "CachedClip",
     "CloudRecognizer",
-    "DarijaTtsSidecar",
+    "DarijaTtsSidecarSynthesizer",
     "DeviceInfo",
+    "DuckingController",
     "EnergyVad",
     "EnergyWakeEngine",
     "Frame",
@@ -118,39 +170,63 @@ __all__ = [
     "FramePacket",
     "FrameProducer",
     "HotkeyListener",
+    "InterruptPolicy",
     "LocalWhisperRecognizer",
     "LoopConfig",
     "LoopState",
+    "MicGate",
+    "Mouth",
+    "MouthConfig",
+    "NullWriter",
     "OpenWakeWordEngine",
     "PiperSynthesizer",
+    "PlaybackResult",
+    "Prosody",
+    "ProsodyDirector",
     "PushToTalk",
     "RecognizerFactory",
     "RecognizerPolicy",
     "RecordedTurn",
     "RingBuffer",
+    "SapiSynthesizer",
     "SegmenterConfig",
     "SelfTestResult",
+    "SentenceSplitter",
+    "SentenceStreamer",
     "Session",
     "SherpaKwsEngine",
     "SherpaOfflineRecognizer",
     "SherpaSpeakerVerifier",
+    "SidecarConfig",
+    "SidecarProcess",
     "SileroVad",
+    "SoundDeviceWriter",
+    "SpokenSentence",
+    "TtsCache",
     "Turn",
     "TurnRecorder",
     "Utterance",
     "VadSegmenter",
+    "VoiceConfig",
     "VoiceLoop",
+    "VoiceSynthesizer",
     "WakeHit",
     "WakeLog",
     "WavFile",
     "build_recognizers",
+    "build_synthesizer",
+    "build_voice_chain",
     "build_wake_engine",
+    "cache_key",
     "check_audio_stack",
     "detect_language",
     "downmix_and_resample",
+    "engine_ready",
     "frame_from_bytes",
     "frame_to_bytes",
     "frames_to_pcm",
+    "http_health",
+    "in_quiet_hours",
     "is_arabic",
     "is_silence",
     "learn_correction",
@@ -162,6 +238,7 @@ __all__ = [
     "number_to_words",
     "pcm_to_frames",
     "pcm_to_wav_bytes",
+    "peak_level",
     "pick_device",
     "platform_notes",
     "rms",
@@ -171,7 +248,10 @@ __all__ = [
     "speech",
     "to_numpy",
     "tone",
+    "tts_status",
     "utterances_from_pcm",
+    "voice_problems",
     "wake_engine_status",
+    "wav_bytes",
     "wav_header",
 ]

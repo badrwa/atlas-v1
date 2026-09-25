@@ -11,12 +11,14 @@ import argparse
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from atlas import __version__
 from atlas.console import CYAN, DIM, Console
 from atlas_core.config import AppConfig, ConfigError, load_config
+from atlas_core.contracts import LanguageTag
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     pass
@@ -581,6 +583,212 @@ def _replay(args: argparse.Namespace, console: Console) -> int:
     return 0
 
 
+def _voice_engine(config, args) -> Any:
+    """The CLI's one place for "which voice did the user ask for?"."""
+    return getattr(args, "tts_engine", "") or None
+
+
+def cmd_say(args: argparse.Namespace, console: Console) -> int:
+    """Speak a line — the L3 mouth, without the ears.
+
+    `--out FILE.wav` writes the audio instead of playing it, which is how a
+    Darija sentence gets to a Moroccan friend for a second opinion.
+    """
+    config = _load(args.config, console)
+    if config is None:
+        return 1
+
+    import asyncio
+    from array import array
+
+    from atlas_audio import Mouth, build_synthesizer, voice_problems
+    from atlas_audio.capture import pcm_to_wav_bytes
+    from atlas_audio.frames import SAMPLE_RATE, resample_pcm
+
+    text = args.text or ""
+    if text == "-":
+        text = sys.stdin.read().strip()
+    if not text:
+        console.fail("nothing to say", "pass the text, or - to read it from stdin")
+        return 1
+
+    language = args.language or config.app.language
+    playing = not args.out
+    if playing and not args.engine and not args.force:
+        from atlas_audio.playback import SoundDeviceWriter
+
+        if not SoundDeviceWriter.available():
+            console.warn(
+                "no output device",
+                "sounddevice is not available — use --out FILE.wav, or pip install 'atlas-audio[audio]'",
+            )
+            return 1
+
+    for note in voice_problems(config, language=language):
+        console.warn("voice", note)
+
+    mouth = Mouth.from_config(
+        config,
+        language=language,
+        voice=args.voice or "",
+        engine=args.engine or None,
+        playing=playing,
+    )
+    if mouth.cache is not None and args.no_cache:
+        mouth.streamer.cache = None
+
+    started = time.monotonic()
+    sentences = asyncio.run(mouth.say(text, language=_language_tag(language), play=playing))
+    total_ms = (time.monotonic() - started) * 1000
+
+    console.title("Say")
+    engine = build_synthesizer(config, language=language, engine=args.engine or None)
+    console.write(f"  engine: {console.paint(engine.name if engine else 'none', DIM)}")
+    for sentence in sentences:
+        cost = "cached" if sentence.cached else f"{sentence.synth_ms:.0f} ms"
+        label = f"[{sentence.prosody.label} · {sentence.engine} · {cost}]"
+        console.write(f"  {console.paint(label, DIM)}  {sentence.text}")
+    console.write()
+    if not any(sentence.audible for sentence in sentences):
+        console.fail(
+            "no voice",
+            "every engine in the chain failed — run `atlas voice` for the install lines",
+        )
+        mouth.close()
+        return 1
+    if args.out:
+        pcm = bytearray()
+        rate = SAMPLE_RATE
+        for sentence in sentences:
+            if not sentence.pcm:
+                continue
+            samples = array("h")
+            samples.frombytes(sentence.pcm)
+            if sentence.sample_rate != SAMPLE_RATE:
+                samples = resample_pcm(samples, source_rate=sentence.sample_rate)
+            pcm.extend(samples.tobytes())
+            rate = SAMPLE_RATE
+        target = Path(args.out)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(pcm_to_wav_bytes(bytes(pcm), sample_rate=rate))
+        console.ok("written", f"{target} · {len(pcm) / 2 / rate:.1f}s")
+    stats = mouth.stats()
+    first = console.paint(f"{stats['first_audio_ms']:.0f} ms", DIM)
+    console.write(
+        f"  first audio {first} · total {total_ms:.0f} ms · "
+        f"cache {stats['cache_hits']}/{stats['sentences']} · {stats['audio_s']}s spoken"
+    )
+    mouth.close()
+    return 0
+
+
+def cmd_voice(args: argparse.Namespace, console: Console) -> int:
+    """The mouth: which engines exist, what they sound like, what is cached."""
+    config = _load(args.config, console)
+    if config is None:
+        return 1
+
+    from atlas_audio import TtsCache, build_synthesizer, tts_status, voice_problems
+
+    action = args.voice_action or "status"
+
+    if action == "warm":
+        from atlas_audio import Mouth
+
+        mouth = Mouth.from_config(config, language=config.app.language, playing=False)
+        if mouth.cache is None:
+            console.warn("no cache", "config.toml has no cache_path — nothing to warm")
+            return 1
+        warmed = asyncio.run(mouth.warm())
+        console.title("Warming the voice cache")
+        if not warmed and mouth.cache.stats().entries == 0:
+            console.fail(
+                "nothing warmed",
+                "no engine could synthesise — run `atlas voice` for the install lines",
+            )
+            return 1
+        console.ok(
+            "warmed",
+            f"{warmed} line(s) synthesised · cache now {mouth.cache.stats().entries} clips",
+        )
+        console.write(console.paint("  → `atlas voice cache` for the size and hit rate", DIM))
+        return 0
+
+    if action == "cache":
+        cache = TtsCache(config.tts.cache_path, max_mb=config.tts.cache_max_mb)
+        if args.clear:
+            removed = cache.clear()
+            console.ok("cache cleared", f"{removed} clips")
+            return 0
+        stats = cache.stats()
+        console.title("TTS cache")
+        console.write(f"  path:  {config.tts.cache_path}")
+        console.write(f"  clips: {stats.entries} · {stats.bytes / 1e6:.1f} MB of {config.tts.cache_max_mb} MB")
+        console.write(f"  hits:  {stats.hits} · misses {stats.misses} · hit rate {stats.hit_rate:.0%}")
+        return 0
+
+    if action == "test":
+        return cmd_say(
+            argparse.Namespace(
+                config=args.config,
+                text=args.text or "",
+                language=args.language,
+                voice=args.voice,
+                engine=args.engine or None,
+                out=args.out,
+                no_cache=False,
+                force=args.force,
+            ),
+            console,
+        )
+
+    console.title("Voices")
+    console.table(("engine", "state"), tts_status(config))
+    console.write()
+    for language in ("ar-MA", "en-GB"):
+        engine = build_synthesizer(config, language=language)
+        console.write(
+            f"  {language}: {console.paint(engine.name if engine else 'none — captions only', DIM)}"
+        )
+        for note in voice_problems(config, language=language):
+            console.warn("fallback", note)
+    console.write()
+    console.write(console.paint("  try: atlas say \"salam, ana Atlas\" --language ar-MA --out /tmp/a.wav", DIM))
+    return 0
+
+
+def _build_mouth(config, console: Console, loop, engine: str | None):
+    """Build the mouth and wire its gate to the loop's mute.  `None` = captions.
+
+    Returns `None` — with a warning, never an error — when there is no way to
+    make a sound on this machine.  A deaf-and-mute first run is a valid first
+    run; refusing to start is not.
+    """
+    from atlas_audio import MicGate, Mouth, voice_problems
+    from atlas_audio.playback import SoundDeviceWriter
+
+    if not SoundDeviceWriter.available():
+        console.warn("voice off", "no audio output — captions only (pip install 'atlas-audio[audio]')")
+        return None
+
+    mouth = Mouth.from_config(
+        config,
+        language=config.app.language,
+        engine=engine,
+        gate=MicGate(on_close=loop.mute, on_open=loop.unmute),
+        playing=True,
+    )
+    console.write(console.paint(f"  voice: {mouth.engine_name} · half duplex", DIM))
+    for note in voice_problems(config, language=config.app.language):
+        console.warn("voice", note)
+    return mouth
+
+
+def _language_tag(language: str) -> LanguageTag:
+    """`ar-MA` / `en-GB` — the contract's own vocabulary, one conversion."""
+    return "en-GB" if str(language).startswith("en") else "ar-MA"
+
+
 def cmd_listen(args: argparse.Namespace, console: Console) -> int:
     """The real thing: wake word, endpointing, ASR, and the L1 brain."""
     config = _load(args.config, console)
@@ -615,6 +823,19 @@ def cmd_listen(args: argparse.Namespace, console: Console) -> int:
         log = WakeLog()
         console.write(f"  wake log: {len(log.hits)} hits · false-wake rate "
                       f"{log.false_wake_rate(hours=4):.2f}/h over the last 4 h")
+        from atlas_audio import TtsCache, build_synthesizer, tts_status
+
+        console.write()
+        console.table(("voice", "state"), tts_status(config))
+        chosen = build_synthesizer(config, language=config.app.language)
+        console.write(
+            f"  voice mode: {console.paint(chosen.name if chosen else 'captions only', DIM)}"
+        )
+        cache = TtsCache(config.tts.cache_path, max_mb=config.tts.cache_max_mb)
+        stats = cache.stats()
+        console.write(
+            f"  tts cache: {stats.entries} clips · {stats.bytes / 1e6:.1f}/{config.tts.cache_max_mb} MB"
+        )
         return 0
 
     if args.replay:
@@ -626,9 +847,24 @@ def cmd_listen(args: argparse.Namespace, console: Console) -> int:
 
     session, _router, _timings = _session(config, console)
 
+    from atlas_audio import Mouth
+
+    mouth: Mouth | None = None
+
     async def respond(text: str, language: str):
-        async for delta in session.stream(text):
-            yield delta
+        tokens = session.stream(text)
+        if mouth is None:
+            async for delta in tokens:
+                yield delta
+            return
+        # The mouth speaks each sentence as it is completed, so the first word
+        # arrives after one sentence is written, not after the whole answer.
+        async for spoken in mouth.speak(
+            tokens, language=_language_tag(language), mood=session.mood.view
+        ):
+            yield spoken
+        if mouth.streamer.truncated:
+            console.write(console.paint("  …(long answer stopped — say “kemmel” for the rest)", DIM))
 
     def say(delta: str) -> None:
         console.write(delta, end="")
@@ -645,6 +881,14 @@ def cmd_listen(args: argparse.Namespace, console: Console) -> int:
         config=VoiceLoopConfig.from_config(config, followup_ms=args.followup_ms, snappy=args.snappy),
     )
 
+    # The mouth is built *after* the loop, because the gate it closes is the
+    # loop's mute: the microphone must be shut before the first byte is played,
+    # and reopened only after the tail.
+    if not args.no_voice:
+        mouth = _build_mouth(config, console, loop, _voice_engine(config, args))
+    elif args.voice_engine:
+        console.warn("voice ignored", "--no-voice was also passed")
+
     console.title("ATLAS")
     console.write(f"  {console.paint('say “atlas” and speak · Ctrl+C to stop', DIM)}")
     for note in notes:
@@ -654,14 +898,14 @@ def cmd_listen(args: argparse.Namespace, console: Console) -> int:
     console.write()
 
     if args.ptt:
-        return asyncio.run(_listen_ptt(loop, built, config, console, args))
+        return asyncio.run(_listen_ptt(loop, built, config, console, args, mouth=mouth))
 
     return asyncio.run(
-        _listen_live(loop, built, config, console, args, recorder=recorder)
+        _listen_live(loop, built, config, console, args, recorder=recorder, mouth=mouth)
     )
 
 
-async def _listen_live(loop, built, config, console: Console, args, *, recorder) -> int:
+async def _listen_live(loop, built, config, console: Console, args, *, recorder, mouth=None) -> int:
     """Microphone → loop, until Ctrl+C or --max-turns."""
     from atlas_audio import FrameBus, FrameProducer
 
@@ -692,12 +936,14 @@ async def _listen_live(loop, built, config, console: Console, args, *, recorder)
                 console.write(console.paint(f"  session saved: {path.parent}", DIM))
         if hasattr(built["factory"], "aclose"):
             await built["factory"].aclose()
+        if mouth is not None:
+            mouth.close()
         console.write()
         console.ok("stopped", f"{len(loop.turns)} turns · {loop.wake_hits} wake hits")
     return 0
 
 
-async def _listen_ptt(loop, built, config, console: Console, args) -> int:
+async def _listen_ptt(loop, built, config, console: Console, args, *, mouth=None) -> int:
     """Terminal push-to-talk: Enter starts a recording, Enter ends it."""
     from atlas_audio import FrameBus, FrameProducer
     from atlas_audio.ptt import HOTKEYS, HotkeyListener, PushToTalk
@@ -710,6 +956,8 @@ async def _listen_ptt(loop, built, config, console: Console, args) -> int:
 
     def request_stop() -> None:  # pragma: no cover - from a hotkey thread
         stop_flag.set()
+        if mouth is not None:
+            mouth.stop("hotkey")
 
     if listener is not None and not listener.start(on_ask=lambda: ptt.begin(), on_stop=request_stop):
         console.warn("hotkeys unavailable", "pip install 'atlas-audio[hotkeys]' — using Enter instead")
@@ -749,6 +997,8 @@ async def _listen_ptt(loop, built, config, console: Console, args) -> int:
         await stream.aclose()
         if listener is not None:
             listener.stop()
+        if mouth is not None:
+            mouth.close()
         if hasattr(built["factory"], "aclose"):
             await built["factory"].aclose()
     return 0
@@ -820,6 +1070,40 @@ def build_parser() -> argparse.ArgumentParser:
     version = sub.add_parser("version", help="versions of the pieces")
     version.set_defaults(func=cmd_version)
 
+    say = sub.add_parser("say", help="speak a line (L3) — no microphone involved")
+    say.add_argument("text", nargs="?", default="", help="what to say, or - to read stdin")
+    say.add_argument("--language", choices=["ar-MA", "en-GB"], help="which voice (default: config)")
+    say.add_argument("--voice", default="", help="voice name override (Piper voice, SAPI name)")
+    say.add_argument(
+        "--engine",
+        choices=["darija_tts_sidecar", "piper", "piper_arabic", "sapi"],
+        help="force an engine (otherwise the chain decides)",
+    )
+    say.add_argument("--out", metavar="FILE.wav", help="write a 16 kHz WAV instead of playing")
+    say.add_argument("--no-cache", action="store_true", help="bypass the TTS cache")
+    say.add_argument("--force", action="store_true", help="try even if the output device looks missing")
+    say.set_defaults(func=cmd_say)
+
+    voice = sub.add_parser("voice", help="voices: status, test, cache")
+    voice.add_argument(
+        "voice_action",
+        nargs="?",
+        default="status",
+        choices=["status", "test", "cache", "warm"],
+    )
+    voice.add_argument("text", nargs="?", default="", help="text for `voice test`")
+    voice.add_argument("--language", choices=["ar-MA", "en-GB"], help="voice test language")
+    voice.add_argument("--voice", default="", help="voice name override")
+    voice.add_argument(
+        "--engine",
+        choices=["darija_tts_sidecar", "piper", "piper_arabic", "sapi"],
+        help="force an engine",
+    )
+    voice.add_argument("--out", metavar="FILE.wav", help="voice test: write a WAV")
+    voice.add_argument("--clear", action="store_true", help="cache: drop every clip")
+    voice.add_argument("--force", action="store_true", help="voice test: ignore the device check")
+    voice.set_defaults(func=cmd_voice)
+
     listen = sub.add_parser("listen", help="wake word + listening (L2)")
     listen.add_argument("--status", action="store_true", help="what the ears can do, then exit")
     listen.add_argument("--ptt", action="store_true", help="push-to-talk: press Enter to talk")
@@ -831,6 +1115,13 @@ def build_parser() -> argparse.ArgumentParser:
     listen.add_argument("--snappy", action="store_true", help="end utterances after 350 ms of silence")
     listen.add_argument("--no-silero", action="store_true", help="force the energy VAD")
     listen.add_argument("--hotkeys", action="store_true", help="global hotkeys (needs the extra)")
+    listen.add_argument("--no-voice", action="store_true", help="captions only, no TTS")
+    listen.add_argument(
+        "--voice-engine",
+        dest="tts_engine",
+        choices=["darija_tts_sidecar", "piper", "piper_arabic", "sapi"],
+        help="force a TTS engine for this session",
+    )
     listen.set_defaults(func=cmd_listen)
 
     audio = sub.add_parser("audio", help="devices, microphone self-test, replay")
