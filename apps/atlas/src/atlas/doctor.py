@@ -348,6 +348,32 @@ def check_identity(report: Report, config: AppConfig | None) -> None:
         report.add(labels.get(piece, piece), WARN if bad else OK, state)
 
 
+def check_ui(report: Report, config: AppConfig | None) -> None:
+    """The face: is there a window, a tray, hotkeys, and does the orb still parse?
+
+    The window is optional by design (L5: "core unaffected if the UI dies"), so a
+    missing pywebview is a WARN with the install line, never a failure.  The asset
+    check runs here too: a truncated `orb.js` is a blank window with no error.
+    """
+    del config
+    try:
+        from atlas_ui import check_assets, status_rows
+    except ImportError:
+        report.add("orb", WARN, "atlas-ui not installed")
+        return
+
+    assets = check_assets()
+    if assets.ok:
+        report.add("orb", OK, f"{len(assets.checked)} files, protocol v1")
+    else:
+        report.add("orb", FAIL, assets.problems[0])
+
+    for piece, state in status_rows():
+        if piece in {"bridge", "window"}:
+            bad = "install" in state.lower() or "not installed" in state.lower()
+            report.add(f"ui · {piece}", WARN if bad else OK, state)
+
+
 def check_privacy(report: Report, config: AppConfig | None) -> None:
     """One row that answers the question the user actually has: what leaves?
 
@@ -433,6 +459,7 @@ def run_checks(*, config_path: str | None = None) -> Report:
     check_ears(report, config)
     check_voice(report, config)
     check_identity(report, config)
+    check_ui(report, config)
     check_privacy(report, config)
     check_workspace(report, config)
     check_environment(report)

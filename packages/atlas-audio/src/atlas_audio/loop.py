@@ -38,11 +38,12 @@ from enum import StrEnum
 from typing import Any
 
 from atlas_audio.capture import TurnRecorder
-from atlas_audio.frames import FRAME_MS, Frame, FrameBus, FramePacket
+from atlas_audio.frames import FRAME_MS, Frame, FrameBus, FramePacket, rms
 from atlas_audio.postprocess import AsrPostProcessor, detect_language
 from atlas_audio.vad import Utterance, VadSegmenter
 from atlas_audio.wake import WakeLog
 from atlas_core.contracts import Detection, SpeechRecognizer, Transcript, WakeWordEngine
+from atlas_core.events import AudioLevel, EventBus, SpeakerMatched, StateChanged
 from atlas_core.identity import Permissions
 
 log = logging.getLogger(__name__)
@@ -177,6 +178,7 @@ class VoiceLoop:
         guard: Any = None,
         profiles: dict[str, Any] | None = None,
         speaker_log: Any = None,
+        events: EventBus | None = None,
     ) -> None:
         self.wake = wake
         self.segmenter = segmenter
@@ -198,8 +200,13 @@ class VoiceLoop:
         #: decide what memory and which tools the reply may see.
         self.permissions: Permissions = Permissions.owner_of("", reason="identity_off")
         self.identity_ms = 0.0
+        #: The orb listens here (L5).  The loop publishes its *own* vocabulary;
+        #: turning that into motion is the UI's job, not the ears'.
+        self.events = events
 
-        self.state = LoopState.IDLE
+        #: Annotated here, always written through `_set_state`, so no assignment
+        #: can skip the notification.
+        self.state: LoopState = LoopState.IDLE
         self.turns: list[Turn] = []
         self.mic_muted = False
         self._mute_depth = 0
@@ -215,12 +222,12 @@ class VoiceLoop:
     # ── arming, half duplex ──────────────────────────────────────────
     def arm(self) -> None:
         """Start waiting for the wake word (the loop is not running until then)."""
-        self.state = LoopState.WAKING
+        self._set_state(LoopState.WAKING)
         self._guard = 0
         self.segmenter.reset()
 
     def stop(self) -> None:
-        self.state = LoopState.STOPPED
+        self._set_state(LoopState.STOPPED)
         self.segmenter.reset()
 
     @property
@@ -290,25 +297,26 @@ class VoiceLoop:
         self.wake_hits += 1
         self._last_wake = detection
         log.info("wake keyword=%s score=%.2f", detection.keyword, detection.score)
-        self.state = LoopState.LISTENING
+        self._set_state(LoopState.LISTENING)
         self._guard = self.config.guard_frames
         # The keyword's own audio must not become the first word of the command.
         self.segmenter.reset()
         return None
 
     async def _handle_listening(self, packet: FramePacket) -> Turn | None:
+        self._emit_level(packet.frame)
         utterance = self.segmenter.feed(packet)
         if utterance is None:
             return None
         return await self._transcribe(utterance, wake=self._last_wake)
 
     async def _transcribe(self, utterance: Utterance, *, wake: Detection | None = None) -> Turn | None:
-        self.state = LoopState.THINKING
+        self._set_state(LoopState.THINKING)
         try:
             transcript = await self.recognizer.transcribe(utterance.pcm, language="unknown")
         except Exception as exc:
             log.warning("asr_failed error=%s", exc)
-            self.state = LoopState.WAKING
+            self._set_state(LoopState.WAKING)
             return None
 
         text = self.processor.process(transcript.text, confidence=transcript.confidence)
@@ -317,7 +325,7 @@ class VoiceLoop:
             language = detect_language(text)
         if not text.strip():
             log.info("empty_transcript engine=%s", transcript.engine)
-            self.state = LoopState.WAKING if wake is None else LoopState.FOLLOWUP
+            self._set_state(LoopState.WAKING if wake is None else LoopState.FOLLOWUP)
             return None
 
         permissions = await self._identify(utterance)
@@ -346,11 +354,42 @@ class VoiceLoop:
             turn.recorded = True
 
         self.permissions = permissions
+        if permissions.speaker or permissions.restricted:
+            self._emit(
+                SpeakerMatched(
+                    name=permissions.speaker,
+                    score=permissions.score,
+                    owner=permissions.owner,
+                )
+            )
         if self.respond is not None:
             await self._reply(turn)
         else:
             self._enter_followup()
         return turn
+
+    # ── state, and telling the orb about it ──────────────────────────
+    def _set_state(self, state: LoopState) -> None:
+        """One writer for `self.state`, so the UI cannot miss a transition."""
+        previous, self.state = self.state, state
+        if previous != state:
+            self._emit(StateChanged(state=state.value, previous=previous.value))
+
+    def _emit(self, event: Any) -> None:
+        """Fire-and-forget publish: the loop never waits on a watcher.
+
+        `EventBus.emit` already owns that policy (a task when a loop is running,
+        a direct publish when there is none); a second implementation here would
+        be a second thing to get wrong, and a slow subscriber must never add
+        latency to a turn.
+        """
+        if self.events is not None:
+            self.events.emit(event)
+
+    def _emit_level(self, frame: Any) -> None:
+        """Microphone loudness, for the orb's listening rings."""
+        if self.events is not None:
+            self._emit(AudioLevel(level=rms(frame)))
 
     async def _identify(self, utterance: Utterance) -> Permissions:
         """Who is speaking?  One embedding, one comparison, one verdict.
@@ -394,7 +433,7 @@ class VoiceLoop:
         assert self.respond is not None
         self._speaking = True
         self.mute()
-        self.state = LoopState.SPEAKING
+        self._set_state(LoopState.SPEAKING)
         chunks: list[str] = []
         try:
             async for delta in self.respond(turn.text, turn.language):
@@ -419,7 +458,7 @@ class VoiceLoop:
         )
 
     def _enter_followup(self) -> None:
-        self.state = LoopState.FOLLOWUP
+        self._set_state(LoopState.FOLLOWUP)
         self._followup_deadline = self.frames_seen + self.config.followup_frames
         self.segmenter.reset()
 
@@ -439,7 +478,7 @@ class VoiceLoop:
 
     async def push_to_talk(self, frames: Iterable[Frame]) -> Turn | None:
         """Skip the wake word: the session was started by a key, not a keyword."""
-        self.state = LoopState.LISTENING
+        self._set_state(LoopState.LISTENING)
         self._guard = 0
         self._last_wake = None
         self.segmenter.reset()

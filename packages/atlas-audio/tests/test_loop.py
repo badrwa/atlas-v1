@@ -8,7 +8,10 @@ the only way a laptop with one microphone can be tested from CI.
 
 from __future__ import annotations
 
+import asyncio
+import itertools
 from array import array
+from typing import Any
 
 import pytest
 from doubles import FakeRecognizer, ScriptedWake, utterance_audio
@@ -343,3 +346,72 @@ def test_tone_is_loud_enough_to_trip_the_energy_vad():
 
     assert rms(tone(FRAME_SAMPLES)) > 0.1
     assert rms(new_frame()) == 0.0
+
+
+# ── the orb's side of the loop (L5) ──────────────────────────────────
+def collecting_bus() -> tuple[Any, list[Any]]:
+    """A bus that records instead of dispatching: tests want the list, not actors."""
+    from atlas_core.events import EventBus
+
+    bus = EventBus()
+    seen: list[Any] = []
+    bus.on("*", seen.append)
+    return bus, seen
+
+
+async def test_every_state_change_is_published_exactly_once():
+    """The orb cannot miss a transition: one writer, one subscriber, in order."""
+    from atlas_core.events import StateChanged
+
+    bus, seen = collecting_bus()
+    loop, _recognizer, _spoken = make_loop()
+    loop.events = bus
+    # Attached after the first arm, so these two are the first things the orb sees.
+    loop.stop()
+    loop.arm()
+
+    await loop.feed_frames(silence(2) + speech(4) + silence(8) + speech(14) + silence(8))
+    await asyncio.sleep(0)  # let the fire-and-forget publishes land
+
+    states = [event.state for event in seen if isinstance(event, StateChanged)]
+    assert states[:3] == ["stopped", "waking", "listening"], states
+    assert "thinking" in states and "speaking" in states, states
+    assert states[-1] in {"followup", "listening"}
+    # No duplicate consecutive states: the FSM may re-enter, the orb must not flicker.
+    assert all(a != b for a, b in itertools.pairwise(states)), states
+
+
+async def test_levels_only_arrive_while_the_microphone_is_open():
+    """Half duplex in the UI too: no level events while Atlas is speaking."""
+    from atlas_core.events import AudioLevel
+
+    bus, seen = collecting_bus()
+    loop, _recognizer, _spoken = make_loop()
+    loop.events = bus
+
+    await loop.feed_frames(silence(2) + speech(4) + silence(8) + speech(14) + silence(8))
+    await asyncio.sleep(0)
+
+    levels = [event for event in seen if isinstance(event, AudioLevel)]
+    assert levels, "the orb needs loudness while listening"
+    assert all(0.0 <= float(event.level) <= 1.0 for event in levels)
+
+
+async def test_a_turn_nobody_claims_is_not_published_as_a_speaker():
+    """No verifier configured → no SpeakerMatched event, and no invented name."""
+    from atlas_core.events import SpeakerMatched
+
+    bus, seen = collecting_bus()
+    loop, _recognizer, _spoken = make_loop()
+    loop.events = bus
+    await loop.feed_frames(speech(4) + silence(8) + speech(14) + silence(8))
+    await asyncio.sleep(0)
+    assert [event for event in seen if isinstance(event, SpeakerMatched)] == []
+
+
+async def test_a_loop_without_a_bus_still_runs():
+    """The ears must not depend on the face: no subscriber, no difference."""
+    loop, _recognizer, _spoken = make_loop()
+    assert loop.events is None
+    turns = await loop.feed_frames(speech(4) + silence(8) + speech(14) + silence(8))
+    assert len(turns) == 1

@@ -5,6 +5,26 @@
 
 ---
 
+> **Implementation notes: [`NOTES-L05.md`](NOTES-L05.md)** — built and
+> sandbox-verified (`pytest` 651 passed, ruff clean, mypy 101 files, both
+> generator gates, and a live WebSocket run against uvicorn). Implemented:
+> `atlas-ui` (protocol + generated `.ts`/`.js`, `ThemeEngine`, `UiHub` with the
+> 30 Hz level and 20 Hz token throttles, `EventBridge`, `OrbWindow`/`WindowState`/
+> `InstanceLock`/`TrayIcon`/`HotkeyManager`), the orb itself (HTML + Canvas2D,
+> no framework), `atlas ui run|serve|status|protocol`, `atlas listen --ui`, the
+> `data/ui-endpoint.json` handshake that lets the window attach to a running
+> conversation, and the loop's own publishing (`_set_state` → `EventBus`).
+> Ten bugs the tests caught are in §4 — the three that matter: `socket: WebSocket`
+> became a required query parameter under `from __future__ import annotations`
+> (every connection died with close code 1008); the window was created and never
+> started (invisible orb, no error); and `system.error` was in neither the
+> protocol table nor the bridge's subscription list, so an error the core raised
+> would never have reached the orb.
+> **Still the laptop's job (§5):** the window on real WebView2, the 100/125/150 %
+> DPI pass, the transparent-vs-opaque decision on the HD 520 driver, RSS/CPU
+> numbers, and the kill-the-orb test. The 30 fps cap and the 12-state union are
+> checked in CI; "does it look like Atlas" is not.
+
 ## Deliverables
 
 - `atlas-ui` package: `EventBridge` (FastAPI + WebSocket), `OrbWindow` (pywebview), `Tray`, `Hotkeys`, `protocol.py` (schema) → generated `orb/protocol.ts`.

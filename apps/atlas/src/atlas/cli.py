@@ -9,9 +9,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
+import logging
 import sys
+import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -19,7 +23,10 @@ from atlas import __version__
 from atlas.console import CYAN, DIM, Console
 from atlas_core.config import AppConfig, ConfigError, load_config
 from atlas_core.contracts import Capability, LanguageTag
+from atlas_core.events import EventBus
 from atlas_core.identity import Audience, DailyGreeter, IdentityConfig
+
+log = logging.getLogger("atlas.cli")
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     pass
@@ -37,8 +44,12 @@ def _load(config_path: str | None, console: Console) -> AppConfig | None:
         return None
 
 
-def _session(config: AppConfig, console: Console, *, structured: bool = False):
-    """Build a chat session wired to every provider that has a key."""
+def _session(config: AppConfig, console: Console, *, structured: bool = False, events=None):
+    """Build a chat session wired to every provider that has a key.
+
+    `events` may be an existing bus: the conversation and the orb then share one
+    stream, which is what `atlas listen --ui` does (no second way to watch a turn).
+    """
     from atlas_core.events import EventBus
     from atlas_core.timings import TimingRecorder
     from atlas_mind import ChatSession, MoodEngine, ProviderRouter, build_providers
@@ -46,7 +57,7 @@ def _session(config: AppConfig, console: Console, *, structured: bool = False):
 
     providers = build_providers(config)
     tracker = QuotaTracker(Path("data/quota.json"))
-    events = EventBus()
+    events = events or EventBus()
     timings = TimingRecorder(Path("data/timings.jsonl"))
     router = ProviderRouter(
         providers,
@@ -423,16 +434,313 @@ def cmd_skills(args: argparse.Namespace, console: Console) -> int:
     return 0
 
 
-def cmd_ui_protocol(args: argparse.Namespace, console: Console) -> int:
-    from atlas_ui import typescript
+def cmd_ui(args: argparse.Namespace, console: Console) -> int:
+    """The face: check it, serve it, or open the window.
 
-    typescript_text = typescript()
-    if args.out:
-        Path(args.out).write_text(typescript_text, encoding="utf-8")
-        console.ok("written", args.out)
+    Three modes, and each one is honest about what is missing:
+
+    * `status` — what would run (bridge, orb files, window, tray, hotkeys);
+    * `serve` — the bridge on loopback, no window: usable in a normal browser;
+    * (default) — bridge + orb window + tray + hotkeys, with failure isolation
+      so a missing WebView2 leaves the ears and the brain running.
+    """
+    config = _load(args.config, console)
+    if config is None:
+        return 1
+
+    from atlas_ui import EventBridge, WindowState, check_assets, status_rows
+    from atlas_ui.bridge import bridge_available, bridge_missing
+    from atlas_ui.window import (
+        HotkeyManager,
+        InstanceLock,
+        OrbWindow,
+        TrayIcon,
+        hotkeys_available,
+        hotkeys_missing,
+    )
+
+    action = args.ui_action or "run"
+
+    if action == "protocol":
+        from atlas_ui import typescript
+
+        text = typescript()
+        if args.out:
+            Path(args.out).write_text(text, encoding="utf-8")
+            console.ok("written", args.out)
+        else:
+            console.write(text)
         return 0
-    console.write(typescript_text)
+
+    report = check_assets()
+    for line in report.as_lines():
+        console.write(console.paint(f"  {line}", DIM) if report.ok else line)
+    for problem in report.problems:
+        console.write(console.paint(f"    · {problem}", DIM))
+
+    if action == "status":
+        console.title("The orb")
+        console.table(("piece", "state"), status_rows())
+        console.write()
+        console.write(
+            console.paint(
+                "  run: atlas ui            (bridge + orb window + tray + hotkeys)",
+                DIM,
+            )
+        )
+        console.write(console.paint("       atlas ui serve      (bridge only — open the URL in a browser)", DIM))
+        return 0
+
+    if not bridge_available():
+        console.fail("cannot serve the orb", bridge_missing())
+        return 1
+
+    bridge = EventBridge(host=args.host or "127.0.0.1", port=args.port, version=_version())
+
+    if action == "serve":
+        return asyncio.run(_serve_orb(bridge, config, console, demo=args.demo))
+
+    # ── the full thing ───────────────────────────────────────────────
+    lock = InstanceLock()
+    if not lock.acquire():
+        console.warn("already running", "an Atlas orb is open — use the tray, or Ctrl+Alt+A")
+        return 1
+
+    # A conversation may already be running in another process (that is how the
+    # orb stays a viewer: kill the window, Atlas keeps talking).  If one is
+    # advertised and still answers, put a face on *that* instead of starting a
+    # second, mute bridge.
+    attached = _live_endpoint(console) if not args.no_attach else None
+
+    url = attached["url"] if attached else bridge.http_url()
+    if args.opaque:
+        url = f"{url}&opaque=1"
+
+    hotkeys = HotkeyManager()
+    tray = TrayIcon()
+
+    def on_action(action_name: str) -> None:
+        console.write(console.paint(f"  · {action_name}", DIM))
+        if action_name == "quit":
+            bridge.running = False
+
+    hotkeys.on_action = on_action
+    tray.on_action = on_action
+
+    console.title("The orb")
+    console.write(f"  orb:   {console.paint(url, DIM)}")
+    console.write(f"  state: {console.paint('dormant', DIM)} · 30 fps cap · captions in DOM")
+
+    window = OrbWindow(url, state=WindowState.load())
+    opened, message = window.supervise()
+    if not opened:
+        console.warn("no window", message)
+        console.write(
+            console.paint(f"  → the orb is still served at {url.split('&')[0]} (open it in Edge)", DIM)
+        )
+    else:
+        console.write(
+            console.paint(f"  window: open ({window.state.width}×{window.state.height})", DIM)
+        )
+    if not hotkeys_available():
+        console.write(console.paint(f"  · {hotkeys_missing()}", DIM))
+    tray.start()
+    hotkeys.start()
+
+    stopper = threading.Event()
+    backend = (
+        _attached_backend(window, console, stopper)
+        if attached
+        else _bridge_backend(bridge, console, stopper)
+    )
+
+    try:
+        if opened:
+            # The GUI loop owns the main thread (that is a WebView2 rule, not a
+            # style choice); the bridge or the conversation runs beside it.
+            window.run(backend)
+            console.write(console.paint("  window closed", DIM))
+        elif attached:
+            # A viewer with no window has nothing to do: the conversation is
+            # somebody else's process, and it keeps running without us.
+            console.write(
+                console.paint("  → open the URL above in Edge, or install pywebview", DIM)
+            )
+        else:
+            backend()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stopper.set()
+        hotkeys.stop()
+        tray.stop()
+        window.save_position()
+        lock.release()
     return 0
+
+
+def _live_endpoint(console: Console, *, root: str = "data") -> dict | None:
+    """A bridge advertised by another process — but only if it still answers."""
+    from atlas_ui.bridge import probe_endpoint, read_endpoint
+
+    found = read_endpoint(root)
+    if not found:
+        return None
+    if probe_endpoint(str(found["url"])) is None:
+        console.write(console.paint("  stale: data/ui-endpoint.json (no bridge there)", DIM))
+        return None
+    console.ok("attached", f"conversation already running (pid {found.get('pid', '?')})")
+    return found
+
+
+def _bridge_backend(bridge, console: Console, stopper: threading.Event) -> Callable[[], None]:
+    """This process is the orb: serve the bridge, then wait for the window to go."""
+
+    def backend() -> None:
+        console.write(console.paint("  Ctrl+C to stop", DIM))
+        try:
+            asyncio.run(_serve_orb_process(bridge, console, stopper))
+        except KeyboardInterrupt:  # pragma: no cover - interactive
+            pass
+        finally:
+            console.write(console.paint(f"  sessions: {bridge.hub.session_count()}", DIM))
+
+    return backend
+
+
+def _attached_backend(window, console: Console, stopper: threading.Event) -> Callable[[], None]:
+    """This process is only the face: the other process owns the conversation."""
+
+    def backend() -> None:
+        console.write(console.paint("  Ctrl+C (or closing the orb) stops the window only", DIM))
+        while not stopper.is_set():
+            stopper.wait(0.4)
+        with contextlib.suppress(Exception):
+            window.close()
+
+    return backend
+
+
+async def _serve_orb_process(bridge, console: Console, stopper: threading.Event | None = None) -> int:
+    """Bridge up, serve until stopped — and always clean up after ourselves."""
+    await bridge.start()
+    try:
+        await bridge.serve()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
+    except Exception as exc:  # pragma: no cover - uvicorn's own failures
+        console.fail("bridge", str(exc))
+        return 1
+    finally:
+        if stopper is not None:
+            stopper.set()
+        await bridge.stop()
+    return 0
+
+
+async def _serve_orb(bridge, config, console: Console, *, demo: bool = False) -> int:
+    """Bridge only: no window, no tray — the orb in any browser on this machine."""
+    console.title("Orb bridge")
+    console.write(f"  open: {console.paint(bridge.http_url(), DIM)}")
+    if bridge.host not in ("127.0.0.1", "localhost"):
+        console.warn(
+            "not loopback",
+            f"the bridge is reachable on {bridge.host} — the token in the URL is the only gate",
+        )
+    console.write(console.paint("  token-gated · Ctrl+C to stop", DIM))
+    await bridge.start()
+    tasks = []
+    if demo:
+        console.write(console.paint("  demo: cycling every state and mood (no microphone)", DIM))
+        tasks.append(asyncio.create_task(_demo_stream(bridge)))
+    try:
+        await bridge.serve()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
+    finally:
+        for task in tasks:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        await bridge.stop()
+    del config
+    console.write(f"  sessions: {bridge.hub.session_count()} · state: {bridge.hub.state}")
+    return 0
+
+
+async def _demo_stream(bridge, *, pause: float = 2.4) -> None:
+    """Walk every state, mood and caption shape — LEVEL-05 step 10, automated.
+
+    This is how the orb is checked without a microphone on the machine: the same
+    messages the real loop publishes, in the same order a conversation produces
+    them, so *"does the visual match the meaning"* is a question with an answer.
+    Every state the orb can draw appears here except `muted` (a hotkey or the mic
+    gate produces it) and `error` (a real failure produces it) — and a test fails
+    if a new state is added without a line here.
+    """
+    from atlas_core.events import (
+        AudioLevel,
+        ConfirmationRequested,
+        DegradedModeChanged,
+        MoodChanged,
+        ReplyFinished,
+        SpeakerMatched,
+        StateChanged,
+        TokenDelta,
+    )
+
+    script: list[object] = [
+        StateChanged(state="idle", previous="stopped"),
+        MoodChanged(mood="calm", energy=0.4, warmth=0.7),
+        StateChanged(state="waking", previous="idle"),
+        StateChanged(state="listening", previous="waking"),
+        AudioLevel(level=0.28),
+        AudioLevel(level=0.41),
+        SpeakerMatched(name="Badr", score=0.83, owner=True),
+        StateChanged(state="followup", previous="listening"),
+        StateChanged(state="listening", previous="followup"),
+        TokenDelta(text="Salam, ana Atlas."),
+        StateChanged(state="thinking", previous="listening"),
+        MoodChanged(mood="focused", energy=0.6, warmth=0.5),
+        TokenDelta(text=" Kifash n3awnek lyoum?"),
+        ConfirmationRequested(question="nsedd l PC?", timeout_s=8.0),
+        StateChanged(state="confirming", previous="thinking"),
+        DegradedModeChanged(degraded=True, reason="no cloud key — lean mode", mode="lean"),
+        DegradedModeChanged(degraded=False, reason="", mode="full"),
+        StateChanged(state="speaking", previous="confirming"),
+        ReplyFinished(text="Safi, l9it liya 3 chwiya: kayn tsera f 10:30.", language="ar-MA"),
+        AudioLevel(level=0.55),
+        AudioLevel(level=0.12),
+        MoodChanged(mood="happy", energy=0.7, warmth=0.9),
+        TokenDelta(
+            text=(
+                "Wah, hadi mzyana — nsifto lik daba. — a caption that is deliberately "
+                "long enough to exercise the two-line clamp and the ellipsis at the front "
+                "of the reply, so the card never grows into a dashboard."
+            )
+        ),
+        StateChanged(state="stopped", previous="speaking"),
+    ]
+    index = 0
+    while True:
+        event = script[index % len(script)]
+        index += 1
+        # The bridge subscribes to the bus; publishing keeps one code path for
+        # real turns and for this walkthrough (no second way to drive the orb).
+        await bridge.bus.publish(event)  # type: ignore[arg-type]
+        await asyncio.sleep(pause)
+
+
+def _version() -> str:
+    from atlas import __version__
+
+    return __version__
+
+
+def cmd_ui_protocol_alias(args: argparse.Namespace, console: Console) -> int:
+    """`atlas ui-protocol` — the L0 command, kept working (one implementation)."""
+    args.ui_action = "protocol"
+    return cmd_ui(args, console)
 
 
 def cmd_version(args: argparse.Namespace, console: Console) -> int:
@@ -1214,7 +1522,11 @@ def cmd_listen(args: argparse.Namespace, console: Console) -> int:
     built, segmenter, wake, notes = _ear_parts(config, console, use_silero=not args.no_silero)
     recorder = TurnRecorder("data/recordings", include_raw=args.capture_dump) if args.capture_dump else None
 
-    session, _router, _timings = _session(config, console)
+    # One bus for the ears, the brain and the face.  Built here even without
+    # `--ui` (an idle bus costs nothing) so every state change has exactly one
+    # destination and there is no second, UI-only code path to keep in sync.
+    ui_bus = EventBus() if args.ui else None
+    session, _router, _timings = _session(config, console, events=ui_bus)
     identity = _build_identity_parts(config, console)
 
     from atlas_audio import Mouth
@@ -1279,6 +1591,7 @@ def cmd_listen(args: argparse.Namespace, console: Console) -> int:
         guard=identity["guard"],
         profiles=identity["repository"].load_all(),
         speaker_log=identity["log"],
+        events=ui_bus,
     )
 
     # The mouth is built *after* the loop, because the gate it closes is the
@@ -1297,12 +1610,70 @@ def cmd_listen(args: argparse.Namespace, console: Console) -> int:
         console.write(console.paint(f"  recording every frame → {recorder.path}", DIM))
     console.write()
 
+    if args.ui and args.ptt:
+        console.warn("ui ignored", "--ptt runs a single push-to-talk turn")
+
     if args.ptt:
         return asyncio.run(_listen_ptt(loop, built, config, console, args, mouth=mouth))
+
+    if args.ui and ui_bus is not None:
+        return asyncio.run(
+            _listen_with_ui(
+                loop, built, config, console, args, bus=ui_bus, recorder=recorder, mouth=mouth
+            )
+        )
 
     return asyncio.run(
         _listen_live(loop, built, config, console, args, recorder=recorder, mouth=mouth)
     )
+
+
+async def _listen_with_ui(
+    loop, built, config, console: Console, args, *, bus, recorder, mouth=None
+) -> int:
+    """`atlas listen --ui`: the conversation, with the orb mirroring it.
+
+    The bridge runs as a task in this same event loop — no thread, no queue, no
+    second bus.  `data/ui-endpoint.json` is written for the first seconds of the
+    run, so `atlas ui run` in another window attaches to *this* conversation
+    instead of starting an idle bridge of its own.  If pywebview is missing, open
+    the printed URL in Edge: exactly the same page.
+    """
+    from atlas_ui import EventBridge
+    from atlas_ui.bridge import bridge_available, bridge_missing
+
+    if not bridge_available():
+        console.warn("ui off", bridge_missing())
+        return await _listen_live(loop, built, config, console, args, recorder=recorder, mouth=mouth)
+
+    if args.ui_port:
+        args.port = args.ui_port
+    bridge = EventBridge(host="127.0.0.1", port=args.ui_port or 8765, bus=bus, version=_version())
+    await bridge.start()
+    console.title("ATLAS · orb")
+    console.write(f"  orb: {console.paint(bridge.http_url(), DIM)}")
+    console.write(
+        console.paint("  attach: atlas ui run   (same orb, its own process)", DIM)
+    )
+    serving = asyncio.create_task(_serve_quietly(bridge))
+    try:
+        return await _listen_live(loop, built, config, console, args, recorder=recorder, mouth=mouth)
+    finally:
+        serving.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await serving
+        await bridge.stop()
+        console.write(console.paint("  orb bridge stopped", DIM))
+
+
+async def _serve_quietly(bridge) -> None:
+    """uvicorn, without letting its own exit take the conversation down."""
+    try:
+        await bridge.serve()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # pragma: no cover - uvicorn's own failures
+        log.warning("bridge_failed error=%s", exc)
 
 
 async def _listen_live(loop, built, config, console: Console, args, *, recorder, mouth=None) -> int:
@@ -1463,9 +1834,20 @@ def build_parser() -> argparse.ArgumentParser:
     skills.add_argument("--limit", type=int, default=20)
     skills.set_defaults(func=cmd_skills)
 
-    ui = sub.add_parser("ui-protocol", help="generate the TypeScript UI contract")
-    ui.add_argument("--out", help="write to a file instead of stdout")
-    ui.set_defaults(func=cmd_ui_protocol)
+    ui = sub.add_parser("ui", help="the orb: state, mood and captions (L5)")
+    ui.add_argument("ui_action", nargs="?", default="run", choices=["run", "serve", "status", "protocol"])
+    ui.add_argument("--opaque", action="store_true", help="rounded card instead of a transparent window")
+    ui.add_argument("--host", default="", help="bridge host (default 127.0.0.1; loopback unless you insist)")
+    ui.add_argument("--port", type=int, default=8765, help="bridge port")
+    ui.add_argument("--demo", action="store_true", help="serve + cycle every state and mood (no microphone)")
+    ui.add_argument("--no-attach", action="store_true", help="ignore a running conversation")
+    ui.add_argument("--out", help="ui protocol: write to a file instead of stdout")
+    ui.set_defaults(func=cmd_ui)
+
+    # Kept as an alias: the L0 README and the CI job both call it.
+    ui_protocol = sub.add_parser("ui-protocol", help="generate the TypeScript UI contract")
+    ui_protocol.add_argument("--out", help="write to a file instead of stdout")
+    ui_protocol.set_defaults(func=cmd_ui_protocol_alias)
 
     version = sub.add_parser("version", help="versions of the pieces")
     version.set_defaults(func=cmd_version)
@@ -1539,6 +1921,12 @@ def build_parser() -> argparse.ArgumentParser:
     listen.add_argument("--snappy", action="store_true", help="end utterances after 350 ms of silence")
     listen.add_argument("--no-silero", action="store_true", help="force the energy VAD")
     listen.add_argument("--hotkeys", action="store_true", help="global hotkeys (needs the extra)")
+    listen.add_argument(
+        "--ui",
+        action="store_true",
+        help="serve the orb bridge for this conversation (attach with: atlas ui run)",
+    )
+    listen.add_argument("--ui-port", type=int, default=0, help="bridge port for --ui (default 8765)")
     listen.add_argument("--no-voice", action="store_true", help="captions only, no TTS")
     listen.add_argument(
         "--voice-engine",

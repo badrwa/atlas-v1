@@ -10,6 +10,7 @@ contract they will speak.
 
 from __future__ import annotations
 
+import json
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -105,26 +106,48 @@ MOOD_HUES: dict[str, int] = {
 }
 
 
+#: The translation table: EventBus topic → the message that carries it.  This is
+#: the whole vocabulary the orb understands; `UiHub` keeps its per-topic policies
+#: keyed by exactly these names and a test fails if the two ever drift apart.
+TOPIC_MESSAGES: dict[str, type[UiMessage]] = {
+    "state.changed": StateMessage,
+    "llm.token": CaptionMessage,
+    "llm.done": CaptionMessage,
+    "mood.changed": MoodMessage,
+    "audio.level": LevelMessage,
+    "tool.started": ToolMessage,
+    "tool.finished": ToolMessage,
+    "confirm.requested": ConfirmMessage,
+    "system.degraded": DegradedMessage,
+    "system.error": StateMessage,
+    "speaker.matched": CaptionMessage,
+}
+
+#: Topics the orb deliberately does not draw.  Declaring them means "the face
+#: ignores this" is a decision someone can review — a new core event becomes a
+#: failing test rather than a feature that is silently invisible.
+SILENT_TOPICS: frozenset[str] = frozenset(
+    {
+        "event",  # the base dataclass; never published on its own
+        "timing.recorded",  # a table in `atlas timings`, not a face
+        "quota.exceeded",  # the router says it in words
+        "audit.entry",  # the vault and the log, never the orb
+        "cost.recorded",  # ditto
+        "wake.detected",  # `state.changed` already says "listening"
+    }
+)
+
+
 def message_for_topic(topic: str) -> type[UiMessage] | None:
     """Map an EventBus topic to the UI message that carries it."""
-    mapping: dict[str, type[UiMessage]] = {
-        "state.changed": StateMessage,
-        "llm.token": CaptionMessage,
-        "mood.changed": MoodMessage,
-        "audio.level": LevelMessage,
-        "tool.started": ToolMessage,
-        "tool.finished": ToolMessage,
-        "confirm.requested": ConfirmMessage,
-        "system.degraded": DegradedMessage,
-    }
-    return mapping.get(topic)
+    return TOPIC_MESSAGES.get(topic)
 
 
 def typescript() -> str:
     """Generate the TypeScript interfaces the orb consumes (never hand-edited)."""
     lines = [
         f"// AUTO-GENERATED from atlas_ui.protocol (v{PROTOCOL_VERSION}) — do not edit by hand.",
-        "// Regenerate with: python -m atlas ui-protocol > atlas-ui/orb/protocol.ts",
+        "// Regenerate with: scripts/gen_ui_protocol.py (or: atlas ui protocol)",
         "",
     ]
     for model in MESSAGE_TYPES:
@@ -135,6 +158,36 @@ def typescript() -> str:
         lines.append("")
     union = " | ".join(model.__name__ for model in MESSAGE_TYPES)
     lines.append(f"export type AtlasMessage = {union};")
+    return "\n".join(lines)
+
+
+def javascript() -> str:
+    """Generate `orb/protocol.js` — the runtime module the orb imports.
+
+    TypeScript cannot run in WebView2 without a build step, and the whole point of
+    L5 is no build step.  So the same models emit two files: `.ts` for editors and
+    type checking, `.js` for the browser.  Hand-writing either one is how they
+    drift, which is why both are generated from this module.
+    """
+    from atlas_ui.theme import CAPTION_FADE_S  # lazy: theme imports this module
+
+    lines = [
+        f"// AUTO-GENERATED from atlas_ui.protocol (v{PROTOCOL_VERSION}) — do not edit by hand.",
+        "// Regenerate with: python scripts/gen_ui_protocol.py",
+        "",
+        f"export const PROTOCOL_VERSION = {PROTOCOL_VERSION};",
+        f"export const CAPTION_FADE_S = {CAPTION_FADE_S};",
+        "",
+        "export const MOOD_HUES = Object.freeze({",
+    ]
+    lines += [f'  {json.dumps(name)}: {hue},' for name, hue in sorted(MOOD_HUES.items())]
+    lines += [
+        "});",
+        "",
+        "export const MESSAGE_KINDS = Object.freeze([",
+    ]
+    lines += [f'  {json.dumps(model.model_fields["kind"].default)},' for model in MESSAGE_TYPES]
+    lines += ["]);", ""]
     return "\n".join(lines)
 
 
@@ -171,6 +224,7 @@ __all__ = [
     "StateMessage",
     "ToolMessage",
     "UiMessage",
+    "javascript",
     "message_for_topic",
     "typescript",
 ]

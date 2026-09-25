@@ -23,7 +23,7 @@ Speaks **Moroccan Darija** by default and **British English** second · knows yo
 | L2 | Ears (wake word, VAD, ASR cloud + local Darija) | **done — see [NOTES-L02](docs/levels/NOTES-L02.md)** |
 | L3 | Mouth (Piper en-GB, DarijaTTS, cache, prosody) | **done — see [NOTES-L03](docs/levels/NOTES-L03.md)** |
 | L4 | Identity (voice enrolment, verification, restricted mode) | **done — see [NOTES-L04](docs/levels/NOTES-L04.md)** (laptop: enrol + sweep) |
-| L5 | Face (orb UI, captions, tray, hotkeys) | not started |
+| L5 | Face (orb UI, captions, tray, hotkeys) | **done — see [NOTES-L05](docs/levels/NOTES-L05.md)** (laptop: window/DPI/RSS) |
 | L6 | Second brain (Obsidian vault, FTS5, git journal, MCP) | not started |
 | L7 | Hands (skills, PC control, permissions, red-team) | not started |
 | L8 | Soul (friend voice, dialect packs, humour, mood) | not started |
@@ -116,7 +116,14 @@ general conversation plus their own note; an unrecognised voice gets general
 conversation and a polite refusal in Darija — and the log records *why*, so
 "nobody is enrolled" and "the model is missing" can never pass silently as
 "everyone is the owner". Voice prints live in `data/` (gitignored), never in the
-vault and never on the wire. **581 tests**, ruff + mypy + duplicate-code and
+vault and never on the wire.
+
+The face (L5) is a 220 px orb in its own process: Canvas2D, no framework, no
+build step, 30 fps cap. It mirrors the conversation over a token-gated WebSocket
+on loopback — state as motion, mood as hue, captions in the DOM (Arabic shaping
+and bidi come free) — and it is a *viewer*: `atlas listen --ui` writes
+`data/ui-endpoint.json`, `atlas ui run` attaches to it, and killing either side
+leaves the other working. **651 tests**, ruff + mypy + duplicate-code and
 architecture checks in CI.
 
 ## Ground rules
