@@ -52,6 +52,7 @@ class Persona:
         memory: str = "",
         tool_names: list[str] | None = None,
         max_sentences: int | None = None,
+        audience: Any = None,
     ) -> str:
         pack = pack_for(str(language))
         template = self._env.get_template("persona.jinja")
@@ -60,6 +61,7 @@ class Persona:
             owner=self.owner,
             call_name=self.config.app.call_name,
             language_label=pack.label,
+            code=pack.code,
             style_rules=pack.style_rules,
             humour=pack.humour,
             banned=pack.banned,
@@ -67,6 +69,7 @@ class Persona:
             mood=mood,
             preferences=preferences or self._default_preferences(),
             memory=memory.strip(),
+            audience=audience,
             tool_names=tool_names or [],
             max_sentences=max_sentences or self._sentence_budget(mood),
         ).strip()

@@ -18,7 +18,8 @@ from typing import TYPE_CHECKING, Any
 from atlas import __version__
 from atlas.console import CYAN, DIM, Console
 from atlas_core.config import AppConfig, ConfigError, load_config
-from atlas_core.contracts import LanguageTag
+from atlas_core.contracts import Capability, LanguageTag
+from atlas_core.identity import Audience, DailyGreeter, IdentityConfig
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     pass
@@ -757,6 +758,315 @@ def cmd_voice(args: argparse.Namespace, console: Console) -> int:
     return 0
 
 
+def cmd_identity(args: argparse.Namespace, console: Console) -> int:
+    """Who Atlas knows, who owns it, and what each voice may reach.
+
+    Every action here is deliberately file-or-mic based: enrol from clips or from
+    the microphone, verify a recording, read the scores.  Nothing in this command
+    needs the cloud, and the profiles never leave `data/`.
+    """
+    config = _load(args.config, console)
+    if config is None:
+        return 1
+
+    from atlas_audio import (
+        EnrollmentSession,
+        SherpaSpeakerVerifier,
+        build_identity,
+        speaker_status,
+    )
+    from atlas_audio.devices import list_devices
+    from atlas_core.identity import ProfileRepository
+
+    action = args.identity_action or "status"
+    identity = build_identity(config)
+
+    if action == "status":
+        console.title("Identity")
+        console.table(("piece", "state"), speaker_status(config))
+        stats = identity["repository"].stats()
+        console.write()
+        console.write(f"  profiles: {console.paint(stats['path'], DIM)}")
+        for name, profile in identity["repository"].load_all().items():
+            role = "owner" if profile.owner else "known"
+            console.write(
+                f"    · {name} ({role}) · quality {profile.quality:.2f} · "
+                f"{len(profile.embeddings)} samples · dim {profile.dimension}"
+            )
+        if not stats["people"]:
+            console.warn(
+                "nobody enrolled",
+                "every voice is treated as a guest — run: atlas identity enrol --name <you>",
+            )
+        summary = identity["log"].summary()
+        if summary["events"]:
+            console.write()
+            console.write(
+                f"  speaker log: {summary['events']} utterances · "
+                f"{summary['accept_rate']:.0%} accepted"
+            )
+            for name, row in dict(summary["speakers"]).items():
+                console.write(console.paint(f"    · {name}: n={row['n']} p50={row['p50']} max={row['max']}", DIM))
+        console.write()
+        console.write(
+            console.paint(
+                "  · voice profiles are local (data/, gitignored) and are a convenience "
+                "gate, not a cryptographic identity — destructive actions still confirm",
+                DIM,
+            )
+        )
+        return 0
+
+    if action == "log":
+        from atlas_core.identity import SpeakerLog
+
+        speaker_log = SpeakerLog(config.identity.log_path)
+        console.title("Speaker log")
+        rows = [
+            (
+                time.strftime("%H:%M:%S", time.localtime(event.at)),
+                event.speaker if event.accepted else f"≈{event.speaker or '?'}",
+                f"{event.score:.2f}",
+                "✓" if event.accepted else "·",
+                event.reason,
+            )
+            for event in speaker_log.tail(args.limit)
+        ]
+        console.table(("time", "speaker", "score", "ok", "reason"), rows)
+        return 0
+
+    if action == "forget":
+        repository: ProfileRepository = identity["repository"]
+        if args.all:
+            if not args.yes:
+                console.warn("confirmation", "this wipes every voice profile — pass --yes")
+                return 1
+            removed = repository.wipe()
+            console.ok("erased", f"{removed} voice profile(s) deleted")
+            console.write(
+                console.paint("  · the person notes in the vault are untouched", DIM)
+            )
+            return 0
+        if not args.name:
+            console.fail("no name", "atlas identity forget --name <who> (or --all --yes)")
+            return 1
+        if not repository.delete(args.name):
+            console.warn("nothing to forget", f"no profile named {args.name!r}")
+            return 1
+        console.ok("erased", f"{args.name}'s voice profile is gone")
+        return 0
+
+    # ── enrol and verify need a verifier ─────────────────────────────
+    if action == "enrol" and not (args.name or config.identity.owner_name or "").strip():
+        # A missing name is the user's typo, not a missing model: say the useful
+        # thing first, even on a machine where the model is not installed yet.
+        console.fail("no name", "atlas identity enrol --name <who>")
+        return 1
+    verifier: SherpaSpeakerVerifier | None = identity["verifier"]
+    if verifier is None:
+        console.fail("identity disabled", "config.toml has [identity] enabled = false")
+        return 1
+    if not verifier.available():
+        console.fail("no speaker model", verifier.missing())
+        console.write(
+            console.paint(
+                f"  → expected at {config.identity.model_path}, or set it in [identity]",
+                DIM,
+            )
+        )
+        return 1
+
+    if action == "verify":
+        from atlas_audio import WavFile
+
+        if not args.path:
+            console.fail("no file", "atlas identity verify <file.wav> [--name who]")
+            return 1
+        samples = WavFile.read(args.path)
+        profiles = identity["repository"].load_all()
+        if not profiles:
+            console.warn("nothing to compare", "enrol first: atlas identity enrol --name <you>")
+            return 1
+        embedding = verifier.embed_or_none(samples.samples)
+        if embedding is None:
+            console.fail("too short", "give me a couple of seconds of speech")
+            return 1
+        console.title("Verify")
+        from atlas_core.identity import best_match
+
+        for name, profile in profiles.items():
+            score = best_match(embedding, profile)
+            mark = "✓" if score >= config.identity.threshold else "·"
+            console.write(
+                f"  {mark} {name:<16} {score:.3f}  "
+                f"{console.paint('owner' if profile.owner else 'known', DIM)}"
+            )
+        console.write()
+        console.write(
+            f"  threshold {config.identity.threshold:.2f} · "
+            f"{console.paint(f'{len(samples.samples) / 16000:.1f}s of audio', DIM)}"
+        )
+        return 0
+
+    if action == "enrol":
+        name = (args.name or config.identity.owner_name or "").strip()
+        repository = identity["repository"]
+        existing = repository.load(name)
+        session = EnrollmentSession(
+            name,
+            verifier=verifier,
+            config=IdentityConfig.from_config(config),
+            language=config.app.language,
+        )
+        console.title(f"Enrolling {name}")
+        if existing:
+            console.write(
+                console.paint(
+                    f"  · replacing {len(existing.embeddings)} old sample(s) "
+                    f"(quality {existing.quality:.2f})",
+                    DIM,
+                )
+            )
+
+        if args.from_files:
+            clips = [_read_clip(Path(path), console) for path in args.from_files]
+            for clip in clips:
+                if clip is None:
+                    return 1
+                step = session.add(clip)
+                _print_step(console, step, session)
+        else:
+            from atlas_audio import FrameBus, FrameProducer  # noqa: F401 - same graph
+
+            console.write(f"  · {session.required} samples × {config.identity.enrol_seconds:.0f}s")
+            console.write(f"  · inputs: {len(list_devices()[0])}")
+            for index in range(session.required):
+                console.write()
+                console.write(f"  {console.paint(session.prompt(index), DIM)}")
+                try:
+                    input("    press Enter, then read it aloud ▸ ")
+                except EOFError:
+                    console.fail("no terminal", "use --from FILE.wav for each sample")
+                    return 1
+                clip = _record_sample(config, console, args)
+                if clip is None:
+                    return 1
+                step = session.add(clip)
+                _print_step(console, step, session)
+
+        problems = session.problems()
+        if problems:
+            console.write()
+            for problem in problems:
+                console.warn("not enrolled", problem)
+            console.write(
+                console.paint(
+                    "  → quiet room, same microphone, speak normally — then try again", DIM
+                )
+            )
+            return 1
+
+        profile = session.profile()
+        if profile is None:  # pragma: no cover - guarded by problems() above
+            console.fail("not enrolled", "the samples did not clear the quality floor")
+            return 1
+        profile.samples = session.index
+        identity["guard"].enroll(profile, owner=bool(args.owner or not repository.owner_name()))
+        if not config.identity.owner_name:
+            console.write(
+                console.paint(
+                    "  · tip: set owner_name in [identity] so the logs and greetings use it",
+                    DIM,
+                )
+            )
+        from atlas_obsidian.vault import VaultAdapter
+
+        vault = VaultAdapter(config.obsidian)
+        if vault.exists:
+            path = vault.ensure_person(name, relationship="owner" if profile.owner else "")
+            console.write(f"  · vault note: {path}")
+        console.write()
+        console.ok(
+            "enrolled",
+            f"{name} · quality {profile.quality:.2f} · "
+            f"{len(profile.embeddings)} samples ({'owner' if profile.owner else 'known'})",
+        )
+        console.write(
+            console.paint("  → now: atlas listen  (Atlas greets you by name once a day)", DIM)
+        )
+        return 0
+
+    console.fail("unknown action", f"{action}: use status, enrol, verify, forget or log")
+    return 1
+
+
+def _read_clip(path: Path, console: Console):
+    """One enrolment sample from a WAV file."""
+    from atlas_audio import WavFile
+
+    if not path.exists():
+        console.fail("missing file", str(path))
+        return None
+    try:
+        return WavFile.read(path).samples
+    except (ValueError, OSError) as exc:
+        console.fail("cannot read", f"{path}: {exc}")
+        return None
+
+
+def _record_sample(config, console: Console, args):
+    """One enrolment sample from the microphone, trimmed of silence."""
+    import asyncio
+
+    from atlas_audio import FrameBus, FrameProducer
+    from atlas_audio.frames import frames_to_pcm
+    from atlas_audio.speaker import as_samples, trim_silence
+
+    device = args.device or config.audio.input_device or None
+    bus = FrameBus()
+    producer = FrameProducer(bus, device=device)
+    producer.start()
+    console.write(console.paint(f"    ● recording {config.identity.enrol_seconds:.0f}s…", DIM))
+
+    async def capture():
+        frames = []
+        stream = bus.stream()
+        try:
+            async for packet in stream:
+                frames.append(packet.frame)
+                if len(frames) * 80 >= config.identity.enrol_seconds * 1000:
+                    break
+        finally:
+            await stream.aclose()
+        return frames
+
+    try:
+        frames = asyncio.run(capture())
+    except KeyboardInterrupt:  # pragma: no cover - interactive
+        console.warn("stopped", "no sample recorded")
+        return None
+    finally:
+        producer.stop()
+
+    if not frames:
+        console.fail("no audio", "the microphone produced nothing")
+        return None
+    pcm = frames_to_pcm(frames)
+    samples = as_samples(pcm)
+    return trim_silence(samples)
+
+
+def _print_step(console: Console, step, session) -> None:
+    """One line per enrolment sample: what happened and what is next."""
+    if not step.ok:
+        console.warn(f"sample {step.index + 1}", step.spoken or step.reason)
+        return
+    console.ok(
+        f"sample {step.index + 1}",
+        f"{step.speech_ms / 1000:.1f}s of speech · agreement {session.quality:.2f}",
+    )
+
+
 def _build_mouth(config, console: Console, loop, engine: str | None):
     """Build the mouth and wire its gate to the loop's mute.  `None` = captions.
 
@@ -782,6 +1092,61 @@ def _build_mouth(config, console: Console, loop, engine: str | None):
     for note in voice_problems(config, language=config.app.language):
         console.warn("voice", note)
     return mouth
+
+
+def _build_identity_parts(config, console: Console):
+    """Guard, verifier, store and log for one session — with the loud warnings.
+
+    The two states a user must never be surprised by are stated at startup: nobody
+    enrolled (so everyone is a guest) and a verifier that cannot load (so the
+    identity gate is effectively off, and the log will say so every turn).
+    """
+    from atlas_audio import build_identity
+
+    identity = build_identity(config)
+    settings = identity["config"]
+    if not settings.enabled:
+        console.write(console.paint("  identity: off — single user, full access", DIM))
+        return identity
+
+    verifier = identity["verifier"]
+    if verifier is not None and not verifier.available():
+        console.warn("identity", verifier.missing())
+        console.write(
+            console.paint("  → until then Atlas treats every voice as you (logged each turn)", DIM)
+        )
+    profiles = identity["repository"].load_all()
+    owner = identity["guard"].owner_name
+    if profiles:
+        names = ", ".join(f"{name}{' (owner)' if profile.owner else ''}" for name, profile in profiles.items())
+        console.write(console.paint(f"  identity: {names} · threshold {settings.threshold:.2f}", DIM))
+    else:
+        console.warn(
+            "nobody enrolled",
+            "every voice is a guest — run: atlas identity enrol --name <you>",
+        )
+    if not owner:
+        console.write(console.paint("  → the first person enrolled becomes the owner", DIM))
+    return identity
+
+
+def _memory_for(config, permissions):
+    """The vault memory this speaker may see — empty for anyone who may not.
+
+    `remember()` is the write side (L7); this is the read side, and it is gated by
+    the same verdict the tool loop uses.  A guest gets their own note, never the
+    owner's.
+    """
+    from atlas_obsidian.vault import VaultAdapter
+
+    vault = VaultAdapter(config.obsidian)
+    if not vault.exists:
+        return ""
+    if permissions.owner:
+        return vault.read_memory()
+    if permissions.subject:
+        return vault.read_person(permissions.subject)
+    return ""
 
 
 def _language_tag(language: str) -> LanguageTag:
@@ -836,6 +1201,10 @@ def cmd_listen(args: argparse.Namespace, console: Console) -> int:
         console.write(
             f"  tts cache: {stats.entries} clips · {stats.bytes / 1e6:.1f}/{config.tts.cache_max_mb} MB"
         )
+        # L4 rows in the same view: "who is talking" is part of the ear report,
+        # and the two states that need a decision (nobody enrolled, no model) are
+        # exactly the ones a user would otherwise discover by being ignored.
+        _build_identity_parts(config, console)
         return 0
 
     if args.replay:
@@ -846,13 +1215,40 @@ def cmd_listen(args: argparse.Namespace, console: Console) -> int:
     recorder = TurnRecorder("data/recordings", include_raw=args.capture_dump) if args.capture_dump else None
 
     session, _router, _timings = _session(config, console)
+    identity = _build_identity_parts(config, console)
 
     from atlas_audio import Mouth
 
     mouth: Mouth | None = None
 
+    # The greeting hook runs on the loop's first verified owner turn of the day.
+    greeter = DailyGreeter("data/last_greeting.txt")
+
     async def respond(text: str, language: str):
-        tokens = session.stream(text)
+        permissions = loop.permissions
+        audience = Audience.from_permissions(
+            permissions, language=_language_tag(language)
+        )
+        # Once a day, and only for the verified owner: a greeting by name before
+        # the answer.  It is spoken, not prepended to the prompt — the model does
+        # not get to "remember" a greeting it did not receive.
+        if permissions.owner and greeter.due(permissions.speaker):
+            greeter.mark(permissions.speaker)
+            line = identity["guard"].greeting(
+                permissions.speaker, language=_language_tag(language)
+            )
+            if line:
+                console.write(f"{console.paint('atlas ▸', CYAN)} {line}")
+                if mouth is not None:
+                    await mouth.say(line, language=_language_tag(language))
+        # Two guards, deliberately independent: the prompt tells the model it is
+        # talking to a guest, and the caller withholds the memory it may not see.
+        memory = ""
+        if permissions.allows(Capability.READ_MEMORY):
+            memory = _memory_for(config, permissions)
+        if permissions.restricted:
+            console.write(console.paint(f"  [unknown voice {permissions.score:.2f}]", DIM))
+        tokens = session.stream(text, memory=memory, audience=audience)
         if mouth is None:
             async for delta in tokens:
                 yield delta
@@ -879,6 +1275,10 @@ def cmd_listen(args: argparse.Namespace, console: Console) -> int:
         recorder=recorder,
         wake_log=WakeLog(),
         config=VoiceLoopConfig.from_config(config, followup_ms=args.followup_ms, snappy=args.snappy),
+        verifier=identity["verifier"],
+        guard=identity["guard"],
+        profiles=identity["repository"].load_all(),
+        speaker_log=identity["log"],
     )
 
     # The mouth is built *after* the loop, because the gate it closes is the
@@ -1069,6 +1469,30 @@ def build_parser() -> argparse.ArgumentParser:
 
     version = sub.add_parser("version", help="versions of the pieces")
     version.set_defaults(func=cmd_version)
+
+    identity = sub.add_parser("identity", help="who Atlas knows, and what each voice may do (L4)")
+    identity.add_argument(
+        "identity_action",
+        nargs="?",
+        default="status",
+        choices=["status", "enrol", "verify", "forget", "log"],
+    )
+    identity.add_argument("path", nargs="?", help="WAV file for `verify`")
+    identity.add_argument("--name", default="", help="whose voice (enrol / forget)")
+    identity.add_argument("--owner", action="store_true", help="enrol as the owner")
+    identity.add_argument(
+        "--from",
+        dest="from_files",
+        action="append",
+        default=[],
+        metavar="FILE.wav",
+        help="enrolment sample from a file (repeat for each sample)",
+    )
+    identity.add_argument("--device", help="input device for enrolment")
+    identity.add_argument("--all", action="store_true", help="forget: every profile")
+    identity.add_argument("--yes", action="store_true", help="forget --all: I mean it")
+    identity.add_argument("--limit", type=int, default=20, help="log: how many lines")
+    identity.set_defaults(func=cmd_identity)
 
     say = sub.add_parser("say", help="speak a line (L3) — no microphone involved")
     say.add_argument("text", nargs="?", default="", help="what to say, or - to read stdin")

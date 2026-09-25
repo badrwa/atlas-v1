@@ -34,11 +34,15 @@ class JsonlLog(Generic[R]):
         load: bool = False,
     ) -> None:
         self.path = Path(path)
-        self.enabled = enabled
+        # `:memory:` is the SQLite spelling of "nowhere on disk", and it means the
+        # same here: a test that asks for an in-memory log must not create a file
+        # called `:memory:` in the working directory (it used to).
+        self.memory_only = str(path) in ("", ":memory:")
+        self.enabled = bool(enabled) and not self.memory_only
         self.records: list[R] = []
         #: True once a record has actually reached the disk this session.
         self.persisted = False
-        if enabled and load:
+        if self.enabled and load:
             self.load()
 
     # ── subclass hooks ───────────────────────────────────────────────

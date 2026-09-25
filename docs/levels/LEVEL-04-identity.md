@@ -5,6 +5,34 @@
 
 ---
 
+> **Implementation notes: [`NOTES-L04.md`](NOTES-L04.md)** — built and
+> sandbox-verified (`pytest` 581 passed, ruff clean, mypy 94 files). Implemented:
+> `atlas_core/identity.py` (the whole policy layer), `atlas_audio/speaker.py`
+> (`SherpaSpeakerVerifier` + `EnrollmentSession`), the capability gate in
+> `SkillRegistry`, person notes in the vault, the audience block in the persona,
+> `atlas identity status|enrol|verify|forget|log`, identity rows in `doctor`, and
+> `scripts/bench_speaker.py` (FAR/FRR sweep). Eight bugs the tests caught are in
+> §4 of the notes — the two interesting ones: a guest could never actually write
+> to their own note (a config-key/path mix-up), and a stale `owner=True` flag
+> could outvote the verdict in the audit trail.
+> **Still the laptop's job (§5):** download the speaker ONNX, enrol your voice,
+> run the sweep on your own clips, and do the 30-minute two-person test. The
+> threshold in `config.toml` stays a guess until then — the plan says FAR ≈ 0
+> even if FRR rises, and that number can only come from your microphone.
+
+## Built differently from the draft (and why)
+
+| Draft | Shipped | Why |
+|---|---|---|
+| `guard.effective_permissions(match, confidence, mood)` | `guard.verify(embedding, utterance_ms=…)` → one `Permissions`, plus `effective_permissions()` for an already-computed match | the guard owns the *comparison* too, so there is one place where a score becomes a capability set |
+| cosine vs 3 embeddings + centroid | best match over a rolling window of 6 | a tired voice should still match the sample from a good day |
+| embeddings + centroid in SQLite | embeddings only, float32 blobs, one owner | a centroid is derivable; storing it is a second thing that can leak |
+| vault `30_People/*.md` per person | same, human-readable only, and `ProfileRepository` **refuses** to live inside the vault | the vault is git-journaled and synced |
+| restricted mode = unknown voice | restricted + `utterance_too_short` + `verifier_unavailable` + `no_profiles` | every path that is not a clean owner match must be *named* in the log |
+| `speaker_log.jsonl` with scores | scores + threshold + reason + mood + ms, never a vector | the sweep needs the threshold that was in force at the time |
+
+---
+
 ## Deliverables
 
 - `SpeakerVerifier` (sherpa-onnx speaker embedding model, e.g. an ERes2Net/3D-Speaker ONNX) with enrolment, verification and score logging.

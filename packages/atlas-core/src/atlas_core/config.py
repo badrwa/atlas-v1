@@ -80,6 +80,37 @@ class AsrSection(BaseModel):
     cloud_audio: bool = True
 
 
+class IdentitySection(BaseModel):
+    """Voice identity (L4).  Defaults are the safe ones.
+
+    `enabled = false` is a legitimate choice for a single-user machine: Atlas
+    then behaves exactly like L3 (full capabilities, no verifier loaded).  With
+    identity on and nobody enrolled, every voice is a guest — which is the secure
+    reading, and `atlas listen` says so out loud at startup.
+    """
+
+    enabled: bool = True
+    owner_name: str = ""
+    #: Cosine threshold. Tune with `scripts/bench_speaker.py` on your own clips —
+    #: the plan's rule is FAR ≈ 0 even if FRR rises: re-asking is cheaper than a leak.
+    threshold: float = 0.65
+    #: A very short utterance cannot carry an owner-only decision (the television
+    #: says one word too). Short matches keep general capabilities.
+    trust_min_ms: float = 1000.0
+    model_path: str = "models/speaker/3dspeaker_speech_eres2net_base.onnx"
+    profiles_path: str = "data/speakers.sqlite3"
+    log_path: str = "data/speaker_log.jsonl"
+    window: int = 6
+    enrol_samples: int = 3
+    enrol_seconds: float = 10.0
+    enrol_min_speech_ms: float = 2500.0
+    quality_floor: float = 0.55
+    drift_rejections: int = 2
+    greet_once_per_day: bool = True
+    #: Guests may use SAFE PC skills (never CONFIRM: that needs the owner).
+    guest_pc_control: bool = False
+
+
 class TtsSection(BaseModel):
     """The mouth (L3).  Every field here is one the user may legitimately want.
 
@@ -246,6 +277,7 @@ class AppConfig(BaseModel):
     obsidian: ObsidianSection = Field(default_factory=ObsidianSection)
     governor: GovernorSection = Field(default_factory=GovernorSection)
     dialogue: DialogueSection = Field(default_factory=DialogueSection)
+    identity: IdentitySection = Field(default_factory=IdentitySection)
     ui: UiSection = Field(default_factory=UiSection)
     skills: SkillsSection = Field(default_factory=SkillsSection)
     providers: list[ProviderConfig] = Field(default_factory=list)

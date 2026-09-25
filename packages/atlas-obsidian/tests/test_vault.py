@@ -215,3 +215,57 @@ def test_git_log_is_readable(vault: VaultAdapter) -> None:
     )
     assert result.returncode == 0
     assert "atlas" in result.stdout.lower()
+
+
+# ── L4: person notes ─────────────────────────────────────────────────
+def test_a_person_note_is_created_once_and_readable(vault: VaultAdapter) -> None:
+    path = vault.ensure_person("Said El Amrani", relationship="friend")
+    assert path.exists()
+    assert path.parent.name == "30_People"
+    assert path.name == "said-el-amrani.md"  # a filesystem-safe slug
+
+    text = vault.read_person("Said El Amrani")
+    assert "name: Said El Amrani" in text
+    assert "relationship: friend" in text
+    assert "## Facts Atlas should remember" in text
+
+    assert vault.ensure_person("Said El Amrani") == path, "second call is a no-op"
+    assert len(vault.people()) == 1
+
+
+def test_facts_are_appended_with_a_date_and_never_overwrite(vault: VaultAdapter) -> None:
+    vault.append_person_fact("said", "kayt9an f atay b nan3na3")
+    vault.append_person_fact("said", "kaykhdem f Casablanca")
+    text = vault.read_person("said")
+    assert "kayt9an f atay b nan3na3" in text
+    assert "kaykhdem f Casablanca" in text, "the earlier fact is still there"
+    assert text.count("- (") == 2, "one dated bullet per fact"
+
+
+def test_the_owner_and_a_guest_have_separate_notes(vault: VaultAdapter) -> None:
+    vault.remember("project Atlas kayt9an f darija")  # the owner's memory file
+    vault.append_person_fact("said", "sahbi dyal badr")
+    assert "sahbi" not in vault.read_memory()
+    assert "sahbi" in vault.read_person("said")
+    assert "darija" not in vault.read_person("said")
+
+
+def test_a_person_note_never_holds_a_voice_print(vault: VaultAdapter) -> None:
+    """The vault is git-journaled and synced; embeddings stay in SQLite."""
+    vault.append_person_fact("said", "sowti tsejjel")  # a fact, not a vector
+    text = vault.read_person("said")
+    assert "embedding" not in text.lower()
+    assert "[[0." not in text and "0.5, " not in text
+
+
+def test_a_person_note_needs_a_name(vault: VaultAdapter) -> None:
+    from atlas_obsidian.vault import VaultError
+
+    with pytest.raises(VaultError):
+        vault.ensure_person("   ")
+
+
+def test_person_writes_are_in_the_git_journal(vault: VaultAdapter) -> None:
+    vault.append_person_fact("said", "kaysken f Rabat")
+    lines = vault.journal.log(limit=5)
+    assert any("said" in line for line in lines), lines

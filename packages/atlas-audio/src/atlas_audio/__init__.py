@@ -11,12 +11,15 @@ Layering, bottom to top:
 * `postprocess` — language detection, dictation numbers, the owner-editable lexicon
 * `loop`        — the FSM-driven turn: wake → listen → transcribe → reply → follow-up
 * `ptt`         — push-to-talk, terminal or hotkey, for when "atlas" is not polite
+* `speaker`     — L4: sherpa-onnx voice embeddings, the enrolment session, the guard wiring
 * `prosody`     — mood → rate/energy/expressiveness, with pitch deliberately absent
 * `cache`       — SQLite LRU of synthesised clips, keyed by text+voice+rate+engine
 * `tts`         — the voices: Piper (en-GB + Arabic), the Darija sidecar, SAPI
 * `playback`    — PCM to the sound card, fades, metering, and the half-duplex gate
 * `speech`      — sentence streaming and `Mouth`, the one object that speaks
-* `engines`     — the L4 slot that is still deliberately unimplemented
+
+Every level L0–L4 now has real implementations; there is no "planned engine" stub
+left in this package, and `atlas doctor` reports each piece's true state instead.
 
 Nothing here needs a microphone to be tested: every engine takes an injected
 reader, detector or model factory, so the whole level runs from WAV files.
@@ -59,7 +62,6 @@ from atlas_audio.devices import (
     list_devices,
     pick_device,
 )
-from atlas_audio.engines import SherpaSpeakerVerifier
 from atlas_audio.frames import (
     FRAME_BYTES,
     FRAME_MS,
@@ -102,6 +104,17 @@ from atlas_audio.postprocess import (
 )
 from atlas_audio.prosody import CALM, Prosody, ProsodyDirector, in_quiet_hours
 from atlas_audio.ptt import HOTKEYS, HotkeyListener, PushToTalk
+from atlas_audio.speaker import (
+    ENROL_PROMPTS,
+    EnrollmentSession,
+    EnrollmentStep,
+    SherpaSpeakerVerifier,
+    build_identity,
+    build_verifier,
+    speaker_status,
+    speech_ms,
+    trim_silence,
+)
 from atlas_audio.speech import (
     CANNED_LINES,
     InterruptPolicy,
@@ -148,6 +161,7 @@ from atlas_audio.wake import (
 __all__ = [
     "CALM",
     "CANNED_LINES",
+    "ENROL_PROMPTS",
     "FRAME_BYTES",
     "FRAME_MS",
     "FRAME_SAMPLES",
@@ -165,6 +179,8 @@ __all__ = [
     "DuckingController",
     "EnergyVad",
     "EnergyWakeEngine",
+    "EnrollmentSession",
+    "EnrollmentStep",
     "Frame",
     "FrameBus",
     "FramePacket",
@@ -213,8 +229,10 @@ __all__ = [
     "WakeHit",
     "WakeLog",
     "WavFile",
+    "build_identity",
     "build_recognizers",
     "build_synthesizer",
+    "build_verifier",
     "build_voice_chain",
     "build_wake_engine",
     "cache_key",
@@ -245,9 +263,12 @@ __all__ = [
     "save_lexicon",
     "self_test",
     "silence",
+    "speaker_status",
     "speech",
+    "speech_ms",
     "to_numpy",
     "tone",
+    "trim_silence",
     "tts_status",
     "utterances_from_pcm",
     "voice_problems",

@@ -42,6 +42,25 @@ class Permission(StrEnum):
     BLOCKED = "blocked"
 
 
+class Capability(StrEnum):
+    """What an utterance may reach for, once identity has decided (L4).
+
+    The vocabulary lives here, next to `Permission`, because both the gate that
+    grants it (`atlas_core.identity.ContextGuard`) and the things that consume it
+    (`SkillRegistry`, the memory service, the vault writer) must agree on the same
+    words — and none of them may import the others.
+    """
+
+    GENERAL = "general"
+    READ_MEMORY = "read_memory"
+    WRITE_VAULT = "write_vault"
+    #: A known other person may write *their own* note; never the owner's memory.
+    OWN_NOTES = "own_notes"
+    PC_CONTROL = "pc_control"
+    DESTRUCTIVE = "destructive"
+    ENROL = "enrol"
+
+
 class Message(BaseModel):
     role: Role
     content: str
@@ -177,12 +196,40 @@ class SkillContext:
 
     speaker: str = ""
     owner: bool = False
+    #: Whose notes a vault write means: "" = the owner, a name = that person's
+    #: own note (set by the guard for a known other, never for a stranger).
+    subject: str = ""
+    #: The guard's verdict for this utterance (`atlas_core.identity.Permissions`).
+    #: Typed loosely on purpose: contracts must not import the identity module,
+    #: and the registry only ever calls `allows()` on it.
+    permissions: Any = None
     language: LanguageTag = "ar-MA"
     dry_run: bool = False
     vault_path: str = ""
     workspace_dir: str = ""
     events: Any = None
     confirmed: bool = False
+
+    def __post_init__(self) -> None:
+        """Fill `speaker`/`subject`/`owner` from the verdict when it is present.
+
+        Callers may pass the guard's `Permissions` as the *only* identity input
+        (`SkillContext(permissions=verdict)`) and everything downstream — the
+        registry's capability gate, a skill writing to a person note — reads the
+        same values.  An explicit field still wins, which is what the loop and
+        the CLI tests rely on.
+        """
+        permissions = self.permissions
+        if permissions is None:
+            return
+        self.speaker = self.speaker or str(getattr(permissions, "speaker", "") or "")
+        self.subject = self.subject or str(getattr(permissions, "subject", "") or "")
+        verdict = getattr(permissions, "owner", None)
+        if verdict is not None:
+            # The verdict *replaces* a passed-in flag: a stale `owner=True` from a
+            # half-wired caller must never end up in the audit trail as "the owner
+            # did this" when the voice was not recognised.
+            self.owner = bool(verdict)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -312,6 +359,10 @@ class Skill(ABC):
     name: str = "skill"
     permission: Permission = Permission.SAFE
     owner_only: bool = False
+    #: Which identity capability this skill needs (L4).  `Permission` says *how
+    #: dangerous* a skill is; `capability` says *who may reach it*.  A guest who
+    #: passes the speaker gate still cannot call a DESTRUCTIVE skill.
+    capability: Capability = Capability.GENERAL
 
     @abstractmethod
     def spec(self) -> ToolSpec: ...
@@ -401,6 +452,7 @@ def trim_to_tokens(chunks: Iterable[str], budget: int, *, sep: str = "\n") -> st
 
 __all__ = [
     "AudioChunk",
+    "Capability",
     "Detection",
     "Engine",
     "HealthReport",

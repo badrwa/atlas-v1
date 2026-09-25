@@ -252,3 +252,137 @@ def test_guest_cannot_shutdown_even_with_confirmation() -> None:
 def test_skill_result_shape_is_stable() -> None:
     result = SkillResult(ok=True, spoken="safi")
     assert result.data == {} and result.needs_confirmation is False
+
+
+# ── L4: the capability gate ──────────────────────────────────────────
+# `ctx.owner` is a *display* flag.  The gate is `ctx.permissions`, which comes
+# from the speaker verifier — so these tests pass an owner flag that disagrees
+# with the verdict, on purpose: the verdict must win.
+def _gated(
+    *,
+    capabilities=(),
+    owner: bool = False,
+    subject: str = "said",
+    displayed_owner: bool | None = None,
+) -> SkillContext:
+    """A context whose *only* identity source is the guard's verdict.
+
+    `displayed_owner` exists so a test can hand the registry a stale flag that
+    disagrees with the verdict — the same shape a half-wired caller would have.
+    """
+    from atlas_core.identity import Permissions
+
+    return SkillContext(
+        owner=owner if displayed_owner is None else displayed_owner,
+        permissions=Permissions(
+            capabilities=frozenset(capabilities),
+            speaker=subject or "unknown",
+            subject=subject,
+            known=bool(subject),
+            owner=owner,
+            accepted=owner,
+        ),
+    )
+
+
+def test_a_restricted_voice_cannot_shutdown_even_with_the_owner_flag() -> None:
+    from atlas_core.identity import RESTRICTED_CAPABILITIES
+
+    calls = _recorder()
+    registry = _registry(ShutdownSkill(action=calls.fire))
+    context = _gated(capabilities=RESTRICTED_CAPABILITIES, owner=False, subject="",
+                     displayed_owner=True)
+    result = registry.call("shutdown_pc", {}, context)
+
+    assert result.ok is False
+    assert calls.calls == []
+    # …and the refusal is the Darija one, because the *verdict* is restricted
+    # even though the caller's own flag claimed otherwise.
+    assert "صاحبي" in result.spoken
+    assert context.owner is False, "the verdict overrides the stale flag"
+
+
+def test_a_restricted_voice_cannot_control_the_pc_or_write_notes() -> None:
+    from atlas_core.identity import RESTRICTED_CAPABILITIES
+
+    opened = _recorder()
+    registry = _registry(SystemStatsSkill(), OpenUrlSkill(opened.open))
+    context = _gated(capabilities=RESTRICTED_CAPABILITIES, subject="")
+
+    for name, args in (
+        ("system_stats", {}),
+        ("open_url", {"url": "https://example.com"}),
+    ):
+        result = registry.call(name, args, context)
+        assert result.ok is False, name
+    assert opened.calls == []
+
+
+def test_general_conversation_still_works_for_a_restricted_voice() -> None:
+    from atlas_core.identity import RESTRICTED_CAPABILITIES
+
+    registry = _registry(FakeSkill())
+    # FakeSkill carries the default GENERAL capability, so a stranger may use it.
+    stranger = _gated(capabilities=RESTRICTED_CAPABILITIES, subject="")
+    assert registry.call("fake_skill", {}, stranger).ok is True
+
+
+def replace_context(context: SkillContext) -> SkillContext:
+    """The same verdict, plus the confirmation the CONFIRM gate demands."""
+    from dataclasses import replace
+
+    return replace(context, confirmed=True)
+
+
+def test_the_owner_keeps_everything() -> None:
+    from atlas_core.identity import OWNER_CAPABILITIES
+
+    calls = _recorder()
+    registry = _registry(ShutdownSkill(action=calls.fire), SystemStatsSkill())
+    context = _gated(capabilities=OWNER_CAPABILITIES, owner=True, subject="badr")
+    assert registry.call("system_stats", {}, context).ok is True
+    confirmed = replace_context(context)
+    assert registry.call("shutdown_pc", {}, confirmed).ok is True
+
+
+def test_a_denied_call_is_audited_and_never_reaches_the_action() -> None:
+    from atlas_core.identity import RESTRICTED_CAPABILITIES
+
+    calls = _recorder()
+    registry = _registry(ShutdownSkill(action=calls.fire))
+    registry.call(
+        "shutdown_pc", {}, _gated(capabilities=RESTRICTED_CAPABILITIES, subject="")
+    )
+    entry = registry.audit_tail(1)[0]
+    assert entry.ok is False
+    assert entry.skill == "shutdown_pc"
+    assert "صاحبي" in entry.spoken, "the audit records the refusal the person heard"
+    assert entry.owner is False, "the audit records the verdict, not a caller's flag"
+    assert calls.calls == []
+
+
+def test_a_guest_writes_facts_about_themselves_and_never_into_memory(
+    tmp_path: Path,
+) -> None:
+    from atlas_core.identity import KNOWN_CAPABILITIES
+
+    vault = VaultAdapter.init_from_template(
+        tmp_path / "v", REPO_ROOT / "vault-template", git=False
+    )
+    registry = _registry(RememberSkill(vault))
+    context = _gated(capabilities=KNOWN_CAPABILITIES, subject="said", owner=False)
+
+    result = registry.call("remember", {"fact": "atay b nan3na3"}, context)
+    assert result.ok is True
+    # `ctx.subject` came from the verdict, so the fact landed in `said`'s note.
+    assert context.subject == "said"
+    assert "said" in result.spoken
+    assert "atay" in vault.read_person("said")
+    assert "atay" not in vault.read_memory(), "a guest's fact never enters the owner's memory"
+
+
+def test_a_context_without_permissions_is_the_pre_l4_world() -> None:
+    """Unit tests and internal callers keep working — no permissions, no gate."""
+    calls = _recorder()
+    registry = _registry(ShutdownSkill(action=calls.fire))
+    assert registry.call("shutdown_pc", {}, _ctx(confirmed=True)).ok is True

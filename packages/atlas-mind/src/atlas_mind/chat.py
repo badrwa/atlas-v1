@@ -12,6 +12,7 @@ import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from time import perf_counter
+from typing import Any
 
 from atlas_core.config import AppConfig
 from atlas_core.contracts import (
@@ -145,11 +146,17 @@ class ChatSession:
         memory: str = "",
         mood: MoodView | None = None,
         structured: bool | None = None,
+        audience: Any = None,
     ) -> TurnResult:
         """Run one turn; returns the full reply (see `stream` for token-by-token)."""
         result = TurnResult()
         async for _delta in self.stream(
-            text, memory=memory, mood=mood, structured=structured, _result=result
+            text,
+            memory=memory,
+            mood=mood,
+            structured=structured,
+            audience=audience,
+            _result=result,
         ):
             pass  # `stream` owns accumulation; send() just drives it to completion
         return result
@@ -161,9 +168,16 @@ class ChatSession:
         memory: str = "",
         mood: MoodView | None = None,
         structured: bool | None = None,
+        audience: Any = None,
         _result: TurnResult | None = None,
     ) -> AsyncIterator[str]:
-        """Yield reply deltas as they arrive (this is what TTS consumes in L3)."""
+        """Yield reply deltas as they arrive (this is what TTS consumes in L3).
+
+        `audience` is L4's identity verdict as the *brain* sees it (a name, and
+        whether this is the owner).  It changes the prompt, never the data: the
+        caller is still responsible for passing `memory=""` when the speaker may
+        not read it — two independent guards, on purpose.
+        """
         started = perf_counter()
         language = self.language.route(text)
         self.mood.observe_owner(text)
@@ -176,6 +190,7 @@ class ChatSession:
             language=language,
             mood=mood or self.mood.view,
             memory=memory,
+            audience=audience,
         )
         request: LlmRequest = self.context.build(
             system=system,
@@ -183,6 +198,10 @@ class ChatSession:
             history=self.history,
             json_schema=REPLY_SCHEMA if use_envelope else None,
             language=language,
+            # Memory travels *inside the system prompt* (persona renders it and
+            # `ContextBuilder` budgets the rest of the window around it).  Passing
+            # it here as well would send it twice and double-charge the budget.
+            memory="",
         )
         if use_envelope and request.system:
             # The envelope instructions live with the schema, not in persona.jinja:

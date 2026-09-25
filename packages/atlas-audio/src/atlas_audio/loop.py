@@ -16,14 +16,22 @@ Four rules shape the whole file:
 3. **A guard after the wake word.** KWS fires at the end of "atlas", but a few
    frames of the keyword itself (and of the chime) are still arriving. Those are
    dropped, so the command never starts with "-las".
-4. **The FSM does not own I/O.** `LoopState` says what is happening — the orb
+4. **Identity is one gate per utterance, not a per-word guess.**  When a verifier
+   and a guard are configured, every utterance is embedded once, compared to the
+   enrolled profiles, and turned into a `Permissions` set *before* the reply is
+   generated.  The loop does not enforce capability itself — it records the
+   verdict on the `Turn` and exposes it as `loop.permissions`, so the caller (the
+   CLI, the tool loop, the vault writer) gates on one answer from one place.
+5. **The FSM does not own I/O.** `LoopState` says what is happening — the orb
    shows it — while this class performs the blocking work.  That separation is
    why the whole loop can be driven by a WAV file, a frame at a time, in tests.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -35,6 +43,7 @@ from atlas_audio.postprocess import AsrPostProcessor, detect_language
 from atlas_audio.vad import Utterance, VadSegmenter
 from atlas_audio.wake import WakeLog
 from atlas_core.contracts import Detection, SpeechRecognizer, Transcript, WakeWordEngine
+from atlas_core.identity import Permissions
 
 log = logging.getLogger(__name__)
 
@@ -107,6 +116,11 @@ class Turn:
     utterance_ms: float = 0.0
     recorded: bool = False
     reply: str = ""
+    #: Who said it (L4).  An empty name with `owner=True` is the single-user case.
+    speaker: str = ""
+    speaker_score: float = 0.0
+    owner: bool = False
+    restricted: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -118,6 +132,10 @@ class Turn:
             "asr_ms": round(self.transcript.duration_ms, 1),
             "utterance_ms": round(self.utterance_ms, 1),
             "wake_score": round(self.wake.score, 3) if self.wake else 0.0,
+            "speaker": self.speaker,
+            "speaker_score": round(self.speaker_score, 3),
+            "owner": self.owner,
+            "restricted": self.restricted,
         }
 
 
@@ -155,6 +173,10 @@ class VoiceLoop:
         recorder: TurnRecorder | None = None,
         wake_log: WakeLog | None = None,
         config: LoopConfig | None = None,
+        verifier: Any = None,
+        guard: Any = None,
+        profiles: dict[str, Any] | None = None,
+        speaker_log: Any = None,
     ) -> None:
         self.wake = wake
         self.segmenter = segmenter
@@ -166,6 +188,16 @@ class VoiceLoop:
         self.recorder = recorder
         self.wake_log = wake_log
         self.config = config or LoopConfig()
+        # L4 is optional on purpose: a loop with no verifier is the L2/L3 loop,
+        # and every existing test keeps working without one.
+        self.verifier = verifier
+        self.guard = guard
+        self.profiles = profiles or {}
+        self.speaker_log = speaker_log
+        #: The verdict for the utterance being handled.  The caller reads this to
+        #: decide what memory and which tools the reply may see.
+        self.permissions: Permissions = Permissions.owner_of("", reason="identity_off")
+        self.identity_ms = 0.0
 
         self.state = LoopState.IDLE
         self.turns: list[Turn] = []
@@ -288,6 +320,7 @@ class VoiceLoop:
             self.state = LoopState.WAKING if wake is None else LoopState.FOLLOWUP
             return None
 
+        permissions = await self._identify(utterance)
         turn = Turn(
             index=len(self.turns),
             transcript=transcript,
@@ -295,6 +328,10 @@ class VoiceLoop:
             language=str(language),
             wake=wake,
             utterance_ms=utterance.duration_ms,
+            speaker=permissions.speaker,
+            speaker_score=permissions.score,
+            owner=permissions.owner,
+            restricted=permissions.restricted,
         )
         self.turns.append(turn)
         if self.recorder:
@@ -308,11 +345,49 @@ class VoiceLoop:
             )
             turn.recorded = True
 
+        self.permissions = permissions
         if self.respond is not None:
             await self._reply(turn)
         else:
             self._enter_followup()
         return turn
+
+    async def _identify(self, utterance: Utterance) -> Permissions:
+        """Who is speaking?  One embedding, one comparison, one verdict.
+
+        Three outcomes, and the log names them:
+
+        * no guard configured → the pre-L4 world: owner capabilities, `no_guard`;
+        * a verifier that cannot run (no model, no microphone) → single user again,
+          *logged* as `verifier_unavailable`, because Atlas must never let a broken
+          gate pass silently for an open one;
+        * everything working → the score decides, and a stranger gets general
+          conversation and nothing else.
+        """
+        if self.guard is None:
+            return Permissions.owner_of("", reason="no_guard")
+
+        verifier = self.verifier
+        available = bool(
+            verifier is not None and getattr(verifier, "available", lambda: False)()
+        )
+        if not available:
+            return self.guard.unavailable(
+                reason="verifier_unavailable", utterance_ms=utterance.duration_ms
+            )
+
+        started = time.perf_counter()
+        embedding = await asyncio.to_thread(verifier.embed_or_none, utterance.pcm)
+        elapsed = (time.perf_counter() - started) * 1000
+        self.identity_ms = elapsed
+        if embedding is None:
+            # Too short to identify: not a rejection, but not a licence either.
+            return self.guard.unavailable(
+                reason="embed_too_short", utterance_ms=utterance.duration_ms
+            )
+        return self.guard.verify(
+            embedding, utterance_ms=utterance.duration_ms, elapsed_ms=elapsed
+        )
 
     async def _reply(self, turn: Turn) -> None:
         """Speak, with the mic muted for the whole of it (half duplex)."""
@@ -382,6 +457,9 @@ class VoiceLoop:
             "guard_dropped": self.frames_dropped_after_wake,
             "wake_engine": self.wake.name,
             "asr": getattr(self.recognizer, "last_choice", "") or getattr(self.recognizer, "name", ""),
+            "speaker": self.permissions.speaker,
+            "capabilities": sorted(str(capability) for capability in self.permissions.capabilities),
+            "identity_ms": round(self.identity_ms, 1),
         }
 
     def summary(self) -> str:

@@ -22,7 +22,7 @@ Speaks **Moroccan Darija** by default and **British English** second · knows yo
 | L1 | Brain (text Darija + en-GB, providers, persona, timings) | **done — see [NOTES-L01](docs/levels/NOTES-L01.md)** |
 | L2 | Ears (wake word, VAD, ASR cloud + local Darija) | **done — see [NOTES-L02](docs/levels/NOTES-L02.md)** |
 | L3 | Mouth (Piper en-GB, DarijaTTS, cache, prosody) | **done — see [NOTES-L03](docs/levels/NOTES-L03.md)** |
-| L4 | Identity (voice enrolment, verification, restricted mode) | not started |
+| L4 | Identity (voice enrolment, verification, restricted mode) | **done — see [NOTES-L04](docs/levels/NOTES-L04.md)** (laptop: enrol + sweep) |
 | L5 | Face (orb UI, captions, tray, hotkeys) | not started |
 | L6 | Second brain (Obsidian vault, FTS5, git journal, MCP) | not started |
 | L7 | Hands (skills, PC control, permissions, red-team) | not started |
@@ -50,6 +50,13 @@ python -m atlas voice           # which voice would speak, and what it still nee
 python -m atlas voice warm      # cache the lines Atlas repeats (greetings, "safi")
 python -m atlas say "Salam, ana Atlas" --language ar-MA      # speak one line
 python -m atlas say "Right." --out out.wav --language en-GB  # or write a WAV
+
+python -m atlas identity              # who Atlas knows, and what each voice may reach
+python -m atlas identity enrol --name badr --owner   # 3 samples × 10 s, by microphone
+python -m atlas identity verify clip.wav             # score one clip against every profile
+python -m atlas identity log                         # every score, every decision
+python -m atlas identity forget --name said          # forget one voice (or --all --yes)
+python scripts/bench_speaker.py                      # pick the threshold from YOUR clips
 ```
 
 Inside `chat`: `/lang en-GB` switches language, `/provider groq` pins a brain,
@@ -100,7 +107,16 @@ ASR with a faster-whisper Darija fallback) and the mouth (Piper en-GB + Arabic,
 the Darija sidecar, a SQLite TTS cache, mood-driven prosody, sentence streaming,
 half-duplex playback) are on top of that. Streaming means the first word arrives
 after one sentence is written, not after the whole answer: `atlas listen` speaks
-while the model is still typing. 472 tests, ruff + mypy + duplicate-code and
+while the model is still typing.
+
+Identity (L4) sits in front of all of it: one sherpa-onnx speaker embedding per
+utterance, one verdict, one place that decides what a voice may reach
+(`ContextGuard`). The owner gets everything; an enrolled other person gets
+general conversation plus their own note; an unrecognised voice gets general
+conversation and a polite refusal in Darija — and the log records *why*, so
+"nobody is enrolled" and "the model is missing" can never pass silently as
+"everyone is the owner". Voice prints live in `data/` (gitignored), never in the
+vault and never on the wire. **581 tests**, ruff + mypy + duplicate-code and
 architecture checks in CI.
 
 ## Ground rules
@@ -109,6 +125,6 @@ architecture checks in CI.
 2. Heavy engines are **leased** (loaded on demand, released on idle) — that's how this survives 8 GB of RAM.
 3. Darija is a first-class language path (ASR, TTS, normalisation, humour, lexicon), not a translation layer.
 4. Every vault write is git-committed and undoable by voice. Nothing is ever deleted, only archived.
-5. Permissions: `SAFE` / `CONFIRM` / `BLOCKED`, gated by voice identity. No shell, ever. Tool output is data, never instructions.
+5. Permissions: `SAFE` / `CONFIRM` / `BLOCKED` **and** a capability set from the speaker verdict, gated in `SkillRegistry`. No shell, ever. Tool output is data, never instructions. A voice profile is a convenience gate, not a cryptographic identity: destructive actions still confirm.
 6. No API keys in git (`.env` + gitleaks pre-commit). Models live in `%LOCALAPPDATA%\atlas\models`.
 7. `pytest` + `ruff` + `mypy` + duplicate-code check in CI — requirement 5 (OOP, no duplication) is enforced by the build, not by discipline.

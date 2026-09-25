@@ -12,7 +12,13 @@ import webbrowser
 from typing import Any, ClassVar
 from urllib.parse import urlparse
 
-from atlas_core.contracts import DeclaredSkill, Permission, SkillContext, SkillResult
+from atlas_core.contracts import (
+    Capability,
+    DeclaredSkill,
+    Permission,
+    SkillContext,
+    SkillResult,
+)
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +43,7 @@ class SystemStatsSkill(DeclaredSkill):
 
     name = "system_stats"
     permission = Permission.SAFE
+    capability = Capability.PC_CONTROL
 
     def __init__(self, ram_probe=None, disk_probe=None, battery_probe=None) -> None:
         # Probes are injected so the skill is testable without psutil.
@@ -85,6 +92,7 @@ class OpenUrlSkill(DeclaredSkill):
 
     name = "open_url"
     permission = Permission.SAFE
+    capability = Capability.PC_CONTROL
 
     def __init__(self, opener=None) -> None:
         self._open = opener or webbrowser.open
@@ -115,6 +123,7 @@ class RememberSkill(DeclaredSkill):
 
     name = "remember"
     permission = Permission.SAFE
+    capability = Capability.WRITE_VAULT
 
     def __init__(self, vault) -> None:
         self.vault = vault
@@ -127,8 +136,21 @@ class RememberSkill(DeclaredSkill):
         fact = str(args.get("fact", "")).strip()
         if len(fact) < 3:
             return SkillResult(ok=False, spoken="ma sme3tch chi haja", data={})
+        # A known other person's facts go to *their* note, never the owner's
+        # memory — the guard sets `subject` and only grants OWN_NOTES with it.
+        subject = (ctx.subject or "").strip() if not ctx.owner else ""
         if ctx.dry_run:
-            return SkillResult(ok=True, spoken=f"[dry-run] nsejel: {fact}", data={"fact": fact})
+            where = f" f 30_People/{subject}" if subject else ""
+            return SkillResult(
+                ok=True, spoken=f"[dry-run] nsejel{where}: {fact}", data={"fact": fact, "subject": subject}
+            )
+        if subject:
+            path = self.vault.append_person_fact(subject, fact)
+            return SkillResult(
+                ok=True,
+                spoken=f"safi {subject}, sejelt hadchi 3lik",
+                data={"fact": fact, "subject": subject, "path": str(path)},
+            )
         path = self.vault.remember(fact)
         return SkillResult(
             ok=True, spoken="safi, dert note", data={"fact": fact, "path": str(path)}
@@ -141,6 +163,7 @@ class ShutdownSkill(DeclaredSkill):
     name = "shutdown_pc"
     permission = Permission.CONFIRM
     owner_only = True
+    capability = Capability.DESTRUCTIVE
 
     def __init__(self, action=None) -> None:
         self._action = action or _noop_action

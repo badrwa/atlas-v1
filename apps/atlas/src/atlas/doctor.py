@@ -317,19 +317,52 @@ def check_voice(report: Report, config: AppConfig | None) -> None:
             report.add("tts cache", WARN, f"unavailable: {exc}")
 
 
+def check_identity(report: Report, config: AppConfig | None) -> None:
+    """L4's rows: does Atlas know who is talking, and where does that live?
+
+    The interesting state is not "is it on" — it is "on, but nobody enrolled" and
+    "on, but the model is missing", because both silently make every voice the
+    owner's.  Both are warnings here, with the command that fixes them.
+    """
+    try:
+        from atlas_audio import speaker_status
+        from atlas_core.identity import IdentityConfig
+    except ImportError:
+        report.add("identity", WARN, "atlas-audio not installed")
+        return
+
+    settings = IdentityConfig.from_config(config)
+    if not settings.enabled:
+        report.add(
+            "identity",
+            WARN,
+            "off — every voice is the owner's",
+            "set [identity] enabled = true",
+        )
+        return
+
+    labels = {"identity": "identity", "threshold": "identity · trust"}
+    for piece, state in speaker_status(config):
+        lower = state.lower()
+        bad = "not installed" in lower or "not found" in lower or "0 people" in lower
+        report.add(labels.get(piece, piece), WARN if bad else OK, state)
+
+
 def check_privacy(report: Report, config: AppConfig | None) -> None:
     """One row that answers the question the user actually has: what leaves?
 
-    Only one thing leaves the machine in L3 — the utterance audio, and only after
-    the wake word, and only when `cloud_audio` is on. Speech *out* is always
-    local: Piper, the sidecar and SAPI all run here.
+    Only one thing leaves the machine: the utterance audio, and only after the
+    wake word, and only when `cloud_audio` is on. Speech *out* is always local
+    (Piper, the sidecar, SAPI), voice prints stay in `data/`, and a recognised
+    *other* person gets general conversation only — the memory gate is enforced
+    twice: the prompt and the caller.
     """
     cloud_audio = bool(getattr(getattr(config, "asr", None), "cloud_audio", True))
     if cloud_audio:
         report.add(
             "privacy",
             WARN,
-            "your utterance goes to the cloud after the wake word; speech out stays local",
+            "your utterance goes to the cloud after the wake word; speech out and voice prints stay local",
         )
     else:
         report.add("privacy", OK, "cloud audio off — your voice never leaves this machine")
@@ -399,6 +432,7 @@ def run_checks(*, config_path: str | None = None) -> Report:
     check_audio(report)
     check_ears(report, config)
     check_voice(report, config)
+    check_identity(report, config)
     check_privacy(report, config)
     check_workspace(report, config)
     check_environment(report)

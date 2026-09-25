@@ -228,6 +228,69 @@ class VaultAdapter:
     def read_memory(self) -> str:
         return self.read_optional(f"{self.config.folder_atlas}/memory.md")
 
+    # ── people (L4: facts belong to whoever said them) ───────────────
+    @property
+    def people_folder(self) -> str:
+        """The config *key* for person notes — `folder_people` (30_People).
+
+        Keys and paths are different things: `folder("people")` resolves the
+        key, `list_notes("people")` wants the key, and `read_optional` wants the
+        resolved path.  Mixing them up is how a note ends up in `30_People/`
+        in one code path and nowhere in another.
+        """
+        return "people"
+
+    @property
+    def people_dir(self) -> Path:
+        """The resolved `30_People` directory."""
+        return self.folder(self.people_folder)
+
+    def person_path(self, name: str) -> Path:
+        return self.people_dir / f"{_slugify(name)}.md"
+
+    def ensure_person(self, name: str, *, relationship: str = "") -> Path:
+        """Create `30_People/<name>.md` if it is not there.
+
+        The note is *human-readable only*: a name, a relationship, and the facts
+        they told Atlas.  Voice embeddings stay in SQLite (plan pitfall #3) — the
+        vault is git-journaled and synced, and biometric data must not be.
+        """
+        if not name.strip():
+            raise VaultError("a person note needs a name")
+        path = self.person_path(name)
+        if path.exists():
+            return path
+        body = (
+            "---\n"
+            "type: person\n"
+            f"name: {name.strip()}\n"
+            f"relationship: {relationship.strip()}\n"
+            "tags: [person]\n"
+            "atlas: managed\n"
+            "---\n\n"
+            f"# {name.strip()}\n\n"
+            "## Facts Atlas should remember\n"
+        )
+        self.people_dir.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        self._commit(f"atlas: person note '{name}'")
+        return path
+
+    def append_person_fact(self, name: str, fact: str) -> Path:
+        """Add one fact to a person's note, creating the note if needed."""
+        path = self.ensure_person(name)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(f"- ({datetime.now():%Y-%m-%d}) {fact.strip()}\n")
+        self._commit(f"atlas: fact about '{name}'")
+        return path
+
+    def read_person(self, name: str) -> str:
+        """One person's note, or empty — the memory a guest's turn may see."""
+        return self.read_optional(f"{self.people_dir.name}/{_slugify(name)}.md")
+
+    def people(self) -> list[NoteRef]:
+        return self.list_notes(self.people_folder)
+
     def archive(self, relative_path: str, *, reason: str = "") -> Path:
         """Move a note to 90_Archive with a date prefix. Never deletes."""
         source = self.require() / relative_path

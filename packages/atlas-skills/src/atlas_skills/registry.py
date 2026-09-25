@@ -87,9 +87,24 @@ class SkillRegistry:
     def _allowed(self, skill: Skill, ctx: SkillContext) -> bool:
         if skill.permission is Permission.BLOCKED:
             return False
+        if not self._capability_ok(skill, ctx):
+            return False
         if skill.owner_only and not ctx.owner:
             return False
         return not (skill.permission is Permission.CONFIRM and not ctx.confirmed)
+
+    @staticmethod
+    def _capability_ok(skill: Skill, ctx: SkillContext) -> bool:
+        """Ask the guard's verdict — never re-derive it from a name (L4, R5).
+
+        A context without permissions is the pre-L4 world (a unit test, an
+        internal call) and is not restricted; the speaker gate is applied where
+        permissions actually exist, which is every real turn.
+        """
+        permissions = getattr(ctx, "permissions", None)
+        if permissions is None:
+            return True
+        return bool(permissions.allows(skill.capability))
 
     def call(self, name: str, args: dict[str, Any] | None = None, ctx: SkillContext | None = None) -> SkillResult:
         """Validate → gate → invoke → audit. The only supported entry point."""
@@ -105,6 +120,26 @@ class SkillRegistry:
         if skill.permission is Permission.BLOCKED:
             reason = f"'{name}' is not callable"
             log.warning("blocked_skill_attempt name=%s speaker=%s", name, context.speaker)
+            return self._audit(name, skill.permission.value, context, args, False, reason, started)
+
+        if not self._capability_ok(skill, context):
+            # The wording follows the *verdict*, never a stale `owner` flag: a
+            # restricted voice hears the refusal in its own language.
+            restricted = getattr(context.permissions, "restricted", None)
+            if restricted is None:
+                restricted = not context.owner
+            reason = (
+                "سمح ليا، هادشي خاص بصاحبي."
+                if restricted
+                else f"your voice cannot reach '{name}' right now"
+            )
+            log.info(
+                "capability_denied skill=%s capability=%s speaker=%s reason=%s",
+                name,
+                getattr(skill.capability, "value", skill.capability),
+                context.speaker,
+                getattr(getattr(context, "permissions", None), "reason", ""),
+            )
             return self._audit(name, skill.permission.value, context, args, False, reason, started)
 
         if skill.owner_only and not context.owner:
