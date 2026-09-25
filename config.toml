@@ -157,11 +157,11 @@ supports_tools = false
 
 [[providers]]
 name = "llamacpp"
-kind = "openai_compatible"
-model = "local-gguf"
+kind = "llama_cpp"            # owns a process, not just a URL (see providers/llama_cpp.py)
+model = "qwen3-1.7b-q4_k_m"
 api_key_env = ""
 base_url = "http://127.0.0.1:8123/v1"
-timeout_s = 60.0
+timeout_s = 120.0             # a 2-core Skylake is slow on the first tokens
 max_output_tokens = 512
-enabled = false               # Bunker brain, started by the ResourceGovernor
+enabled = false               # Bunker brain: leased on demand, unloaded when idle
 supports_tools = false

@@ -19,7 +19,7 @@ Speaks **Moroccan Darija** by default and **British English** second · knows yo
 | Level | Name | State |
 |---|---|---|
 | L0 | Foundation (workspace, contracts, DI, events, FSM, CI) | **done — see [NOTES-L00](docs/levels/NOTES-L00.md)** |
-| L1 | Brain (text Darija + en-GB, providers, persona, timings) | not started |
+| L1 | Brain (text Darija + en-GB, providers, persona, timings) | **done — see [NOTES-L01](docs/levels/NOTES-L01.md)** |
 | L2 | Ears (wake word, VAD, ASR cloud + local Darija) | not started |
 | L3 | Mouth (Piper en-GB, DarijaTTS, cache, prosody) | not started |
 | L4 | Identity (voice enrolment, verification, restricted mode) | not started |
@@ -37,6 +37,16 @@ uv sync --all-packages          # or: pip install -e packages/* -e apps/atlas
 cp .env.example .env            # add your keys (Gemini first: aistudio.google.com/apikey)
 python -m atlas doctor          # what works on this machine, honestly
 python -m atlas chat            # talk to it — Darija by default, /help for commands
+python -m atlas chat --structured   # also get language/emotion metadata per turn
+```
+
+Inside `chat`: `/lang en-GB` switches language, `/provider groq` pins a brain,
+`/mood` shows how Atlas reads the room, `/timing` shows where the milliseconds
+go. A reply line looks like:
+
+```
+atlas ▸ safi, dakhla daba.
+  [groq · ttft 380ms · total 1420ms · ar-MA · happy · mood happy]
 ```
 
 A fresh clone with no keys still runs: `doctor` reports what is missing, and
@@ -47,8 +57,11 @@ What is real today: the kernel (`atlas-core`: contracts, event bus, FSM, leases,
 timings, config, fakes), the brain (`atlas-mind`: seven providers, quota/retry/
 timing chain, Darija normalisation, lexicon, dialect packs, persona, streaming
 chat), the vault writer (`atlas-obsidian`: git-journaled, undoable), the skill
-registry with an owner gate, and the CLI. 181 tests, ruff + mypy + duplicate-code
-and architecture checks in CI.
+registry with an owner gate, and the CLI. The brain holds a Darija-first
+conversation, switches to British English on request, answers with one honest
+sentence when the network is gone, and keeps its own per-turn overhead at 0.2 ms
+— so the only thing a user waits for is the model. 267 tests, ruff + mypy +
+duplicate-code and architecture checks in CI.
 
 ## Ground rules
 

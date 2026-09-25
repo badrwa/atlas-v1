@@ -233,10 +233,12 @@ class CannedReplyProvider(LlmProvider):
         self.language = language
 
     def stream(self, request: LlmRequest) -> AsyncIterator[LlmEvent]:
-        return self._gen()
+        # The turn's language wins: after "speak English", an apology in Darija
+        # is worse than no apology.
+        return self._gen(request.language or self.language)
 
-    async def _gen(self) -> AsyncIterator[LlmEvent]:
-        yield TextDelta(text=OFFLINE_LINES.get(self.language, OFFLINE_LINES["unknown"]))
+    async def _gen(self, language: str) -> AsyncIterator[LlmEvent]:
+        yield TextDelta(text=OFFLINE_LINES.get(language, OFFLINE_LINES["unknown"]))
         yield StreamEnd(reason="fallback")
 
     async def health(self) -> HealthReport:
@@ -272,33 +274,50 @@ class ProviderRouter:
             for provider in providers
         ]
         self.last_provider: str = ""
+        # Pinning is a preference, not a promise: the pinned provider goes
+        # first, and the rest of the chain still catches it when it fails.
+        self.pinned: str = ""
 
     # ── introspection ────────────────────────────────────────────────
     @property
     def names(self) -> list[str]:
         return [provider.name for provider in self.providers]
 
+    def order(self) -> list[LlmProvider]:
+        """The chain as it will actually be tried, pinned provider first."""
+        if not self.pinned:
+            return list(self.providers)
+        pinned = [p for p in self.providers if p.name == self.pinned]
+        return pinned + [p for p in self.providers if p.name != self.pinned]
+
     def describe(self) -> str:
         if not self.providers:
             return "no providers configured (add a key to .env)"
-        return " → ".join(self.names)
+        chain = " → ".join(p.name for p in self.order())
+        return f"{chain}  [pinned: {self.pinned}]" if self.pinned else chain
 
     # ── the turn ─────────────────────────────────────────────────────
     async def stream(self, request: LlmRequest) -> AsyncIterator[LlmEvent]:
         if not self.providers:
-            fallback = CannedReplyProvider(self.fallback_language)
+            fallback = CannedReplyProvider(request.language or self.fallback_language)
             async for event in fallback.stream(request):
                 yield event
             self.last_provider = fallback.name
             return
 
-        for provider in self.providers:
+        for provider in self.order():
             emitted = False
             try:
                 async for event in provider.stream(request):
                     if isinstance(event, TextDelta) and event.text.strip():
                         emitted = True
                     yield event
+                if not emitted:
+                    # A provider that says nothing has failed, even though it
+                    # streamed no error.  Silence is the one thing a voice
+                    # assistant may never answer with — try the next brain.
+                    log.warning("provider_empty name=%s", provider.name)
+                    continue
                 self.last_provider = provider.name
                 return
             except ProviderError as exc:
@@ -309,7 +328,7 @@ class ProviderRouter:
                     return
                 continue
 
-        fallback = CannedReplyProvider(self.fallback_language)
+        fallback = CannedReplyProvider(request.language or self.fallback_language)
         async for event in fallback.stream(request):
             yield event
         self.last_provider = fallback.name

@@ -34,24 +34,31 @@ def _load(config_path: str | None, console: Console) -> AppConfig | None:
         return None
 
 
-def _session(config: AppConfig, console: Console):
+def _session(config: AppConfig, console: Console, *, structured: bool = False):
     """Build a chat session wired to every provider that has a key."""
     from atlas_core.events import EventBus
     from atlas_core.timings import TimingRecorder
-    from atlas_mind import ChatSession, ProviderRouter, build_providers
+    from atlas_mind import ChatSession, MoodEngine, ProviderRouter, build_providers
     from atlas_mind.router import QuotaTracker
 
     providers = build_providers(config)
     tracker = QuotaTracker(Path("data/quota.json"))
     events = EventBus()
-    timings = TimingRecorder()
+    timings = TimingRecorder(Path("data/timings.jsonl"))
     router = ProviderRouter(
         providers,
         tracker=tracker,
         events=events,
         fallback_language=config.app.language,
     )
-    session = ChatSession(config, router, timings=timings, events=events)
+    session = ChatSession(
+        config,
+        router,
+        timings=timings,
+        events=events,
+        mood=MoodEngine(),
+        structured=structured,
+    )
     return session, router, timings
 
 
@@ -71,16 +78,24 @@ def cmd_providers(args: argparse.Namespace, console: Console) -> int:
 
     console.title("Providers")
     usable = [p for p in config.providers if p.is_configured()]
-    rows = [
-        (
-            p.name,
-            p.kind,
-            p.model,
-            "key ✓" if p.is_configured() else "no key",
-            "on" if p.enabled else "off",
+    rows: list[tuple[str, str, str, str, str]] = []
+    for entry in config.providers:
+        if entry.kind == "llama_cpp":
+            from atlas_mind.providers.llama_cpp import SidecarSpec
+
+            spec = SidecarSpec()
+            gaps = "missing " + ", ".join(spec.missing) if spec.missing else "ready"
+            rows.append((entry.name, entry.kind, entry.model, "local", f"{'on' if entry.enabled else 'off'} · {gaps}"))
+            continue
+        rows.append(
+            (
+                entry.name,
+                entry.kind,
+                entry.model,
+                "local" if entry.is_local else ("key ✓" if entry.is_configured() else "no key"),
+                "on" if entry.enabled else "off",
+            )
         )
-        for p in config.providers
-    ]
     console.table(("provider", "kind", "model", "key", "state"), rows)
     console.write()
     console.write(f"fallback order: {console.paint(' → '.join(p.name for p in usable) or '—', DIM)}")
@@ -131,17 +146,19 @@ def cmd_chat(args: argparse.Namespace, console: Console) -> int:
     if config is None:
         return 1
     try:
-        return asyncio.run(_chat_loop(config, console, once=args.once))
+        return asyncio.run(_chat_loop(config, console, once=args.once, structured=args.structured))
     except KeyboardInterrupt:  # pragma: no cover - interactive
         console.write()
         console.write("bslama 👋")
         return 0
 
 
-async def _chat_loop(config: AppConfig, console: Console, *, once: str = "") -> int:
+async def _chat_loop(
+    config: AppConfig, console: Console, *, once: str = "", structured: bool = False
+) -> int:
     from atlas_mind.chat import TurnResult
 
-    session, router, timings = _session(config, console)
+    session, router, timings = _session(config, console, structured=structured)
 
     console.title("ATLAS")
     console.write(
@@ -151,7 +168,9 @@ async def _chat_loop(config: AppConfig, console: Console, *, once: str = "") -> 
             DIM,
         )
     )
-    console.write(console.paint("type /help for commands, /quit to leave", DIM))
+    console.write(
+        console.paint(f"mode: {'structured' if structured else 'fast'} · /help for commands", DIM)
+    )
     console.write()
 
     while True:
@@ -183,15 +202,25 @@ async def _chat_loop(config: AppConfig, console: Console, *, once: str = "") -> 
 
 
 def _print_meta(result, console: Console) -> None:
-    """One honest line under every reply: who answered, how fast, in what language."""
+    """One honest line under every reply: who answered, how fast, what mood."""
     if result.ttft_ms is None:
         console.write()
         return
-    meta = (
-        f"[{result.provider or 'canned'} · ttft {result.ttft_ms:.0f}ms · "
-        f"total {result.total_ms:.0f}ms · {result.language}]"
-    )
-    console.write(console.paint("  " + meta, DIM))
+    parts = [
+        result.provider or "canned",
+        f"ttft {result.ttft_ms:.0f}ms",
+        f"total {result.total_ms:.0f}ms",
+        result.language,
+    ]
+    if result.emotion:
+        parts.append(result.emotion)
+    if result.mood:
+        parts.append(f"mood {result.mood.get('label')}")
+    if result.repaired:
+        parts.append("repaired")
+    if result.followup:
+        parts.append("asks back")
+    console.write(console.paint("  [" + " · ".join(parts) + "]", DIM))
     console.write()
 
 
@@ -208,6 +237,9 @@ def _command(text: str, session, router, timings, console: Console) -> bool:
             ("command", "what it does"),
             [
                 ("/lang <ar-MA|en-GB>", "switch language now"),
+                ("/provider <name|auto>", "pin one brain, or let the chain decide"),
+                ("/mood", "how Atlas reads the room right now"),
+                ("/structured", "toggle metadata mode (slower first token)"),
                 ("/reset", "forget this conversation"),
                 ("/timing", "latency of the last turns"),
                 ("/providers", "who can answer right now"),
@@ -229,6 +261,15 @@ def _command(text: str, session, router, timings, console: Console) -> bool:
         console.write(timings.format_summary() if timings else "no timings recorded yet")
     elif command == "/providers":
         console.write(router.describe())
+    elif command == "/provider":
+        _set_provider(rest, router, console)
+    elif command == "/mood":
+        console.table(("key", "value"), [(k, str(v)) for k, v in session.mood.view.as_dict().items()])
+        if session.mood.history:
+            console.write(console.paint(f"  recent: {' → '.join(session.mood.history[-8:])}", DIM))
+    elif command == "/structured":
+        session.structured = not session.structured
+        console.write(f"structured mode {'on' if session.structured else 'off'}")
     else:
         console.warn("unknown command", f"{command} — try /help")
     return True
@@ -248,6 +289,23 @@ def _find_template(explicit: str | None = None) -> Path | None:
         if candidate and Path(candidate).is_dir():
             return Path(candidate)
     return None
+
+
+def _set_provider(rest: list[str], router, console: Console) -> None:
+    """Pin one provider, or hand control back to the fallback chain."""
+    if not rest:
+        console.write(f"order: {router.describe()}")
+        return
+    wanted = rest[0].lower()
+    if wanted in {"auto", "chain"}:
+        router.pinned = ""
+        console.write(f"auto — {router.describe()}")
+        return
+    if wanted not in router.names:
+        console.warn("unknown provider", f"{wanted} — known: {', '.join(router.names)}")
+        return
+    router.pinned = wanted
+    console.write(f"pinned to {wanted}{console.paint(' (falls back if it fails)', DIM)}")
 
 
 def cmd_vault(args: argparse.Namespace, console: Console) -> int:
@@ -431,6 +489,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     chat = sub.add_parser("chat", help="talk to Atlas")
     chat.add_argument("--once", default="", metavar="TEXT", help="send one message and exit")
+    chat.add_argument(
+        "--structured",
+        action="store_true",
+        help="also get language/emotion metadata (costs time-to-first-token)",
+    )
     chat.set_defaults(func=cmd_chat)
 
     vault = sub.add_parser("vault", help="the Obsidian second brain")

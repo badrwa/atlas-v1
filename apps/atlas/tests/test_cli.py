@@ -132,7 +132,8 @@ def test_providers_lists_local_ones_as_usable_without_a_key(vc) -> None:
     code, out = vc[1]("providers")
     assert code == 0
     assert "deadlocal" in out
-    assert "key ✓" in out
+    assert "local" in out
+    assert "no key" not in out
 
 
 def test_providers_explains_when_no_key_is_set(vc) -> None:

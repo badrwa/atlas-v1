@@ -141,7 +141,10 @@ class ProviderConfig(BaseModel):
     """One LLM provider. `kind` selects the implementation; everything else is data."""
 
     name: str
-    kind: Literal["openai_compatible", "gemini"] = "openai_compatible"
+    # Adding a provider kind means adding it here *and* registering it in
+    # atlas_mind.providers.factory — two deliberate edits, never a typo that
+    # silently falls back to the wrong wire protocol.
+    kind: Literal["openai_compatible", "gemini", "llama_cpp"] = "openai_compatible"
     model: str = ""
     api_key_env: str = ""
     base_url: str = ""

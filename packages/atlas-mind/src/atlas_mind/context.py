@@ -35,6 +35,8 @@ class ContextBuilder:
         history: list[Message] | None = None,
         memory: str = "",
         tools: list | None = None,
+        json_schema: dict | None = None,
+        language: str = "",
     ) -> LlmRequest:
         history = list(history or [])[-self.max_turns :]
 
@@ -71,6 +73,8 @@ class ContextBuilder:
             tools=tools or [],
             temperature=self.config_temperature,
             max_output_tokens=self.max_output_tokens,
+            json_schema=json_schema,
+            language=language,
         )
 
     def _fit_memory(self, memory: str, spent: int) -> str:

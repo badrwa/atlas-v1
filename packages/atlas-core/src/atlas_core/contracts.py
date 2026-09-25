@@ -64,6 +64,10 @@ class LlmRequest(BaseModel):
     temperature: float = 0.7
     max_output_tokens: int = 512
     json_schema: dict[str, Any] | None = None
+    # The language this turn is expected in.  Providers mostly ignore it (the
+    # system prompt already carries the style), but anything that has to *speak
+    # without a model* — the offline fallback, an error line — needs to know.
+    language: str = ""
 
 
 # ── streaming events emitted by providers ────────────────────────────

@@ -8,7 +8,6 @@ edit instead of an archaeology dig.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,18 +16,9 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoes
 from atlas_core.config import AppConfig
 from atlas_core.contracts import LanguageTag
 from atlas_mind.dialects import DialectPack, pack_for
+from atlas_mind.mood import MoodView
 
 PROMPT_DIR = Path(__file__).parent / "prompts"
-
-
-@dataclass(slots=True)
-class MoodView:
-    """What the persona needs to know about mood (full MoodEngine lands in L8)."""
-
-    label: str = "calm"
-    energy: float = 0.5
-    warmth: float = 0.6
-    humor_allowed: bool = True
 
 
 class Persona:

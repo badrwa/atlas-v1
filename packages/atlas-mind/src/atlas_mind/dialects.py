@@ -14,7 +14,12 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True, slots=True)
 class DialectPack:
-    """Voice, register and humour rules for one language/dialect."""
+    """Voice, register and humour rules for one language/dialect.
+
+    Scope: what makes *this* language sound like itself.  Universal rules (no
+    markdown, keep it short, never claim a false action) live in persona.jinja —
+    written once, and the same for every language.
+    """
 
     code: str
     label: str
@@ -49,7 +54,6 @@ DARIJA = DialectPack(
         "Keep sentences short: one idea per sentence, like talking to a friend over tea.",
         "Use 'nta' (masculine) unless the owner's preferences say otherwise.",
         "Never say 'هل يمكنني مساعدتك' or any stiff MSA phrasing.",
-        "No markdown, no lists, no emoji — this is speech, not a document.",
     ),
     banned=(
         "هل يمكنني", "بكل سرور", "أنا هنا لمساعدتك", "كمساعد ذكاء اصطناعي",
@@ -78,7 +82,6 @@ EN_GB = DialectPack(
         "Speak British English, not American: 'have a go' not 'give it a shot', "
         "'bits and bobs', 'sorted', 'proper' as an intensifier, 'cheers' for thanks.",
         "Understate. 'Not bad' beats 'amazing'.",
-        "Short spoken sentences; no bullet points read aloud.",
         "Dry humour is welcome; enthusiasm inflation is not.",
     ),
     banned=(

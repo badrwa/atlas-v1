@@ -13,6 +13,7 @@ from atlas_core.config import AppConfig, ProviderConfig
 from atlas_core.contracts import LlmProvider
 from atlas_core.errors import ConfigError
 from atlas_mind.providers.gemini import GeminiProvider
+from atlas_mind.providers.llama_cpp import LlamaCppProvider
 from atlas_mind.providers.openai_compatible import OpenAiCompatibleProvider
 
 log = logging.getLogger(__name__)
@@ -20,6 +21,9 @@ log = logging.getLogger(__name__)
 _REGISTRY: dict[str, type] = {
     "openai_compatible": OpenAiCompatibleProvider,
     "gemini": GeminiProvider,
+    # Same wire protocol, but this one also owns a local process — so it is a
+    # kind of its own rather than an openai_compatible entry with a URL.
+    "llama_cpp": LlamaCppProvider,
 }
 
 
@@ -52,7 +56,8 @@ def build_providers(
 ) -> list[LlmProvider]:
     """Every usable provider, in the configured order (missing keys are skipped)."""
     providers = [
-        build_provider(entry, env=env, client=client) for entry in config.ordered_providers(env)
+        build_provider(entry, env=env, client=client)
+        for entry in config.ordered_providers(env)
     ]
     if not providers:
         log.warning("no providers configured — add a key to .env (see .env.example)")
