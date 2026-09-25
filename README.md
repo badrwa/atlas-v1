@@ -20,7 +20,7 @@ Speaks **Moroccan Darija** by default and **British English** second · knows yo
 |---|---|---|
 | L0 | Foundation (workspace, contracts, DI, events, FSM, CI) | **done — see [NOTES-L00](docs/levels/NOTES-L00.md)** |
 | L1 | Brain (text Darija + en-GB, providers, persona, timings) | **done — see [NOTES-L01](docs/levels/NOTES-L01.md)** |
-| L2 | Ears (wake word, VAD, ASR cloud + local Darija) | not started |
+| L2 | Ears (wake word, VAD, ASR cloud + local Darija) | **done — see [NOTES-L02](docs/levels/NOTES-L02.md)** |
 | L3 | Mouth (Piper en-GB, DarijaTTS, cache, prosody) | not started |
 | L4 | Identity (voice enrolment, verification, restricted mode) | not started |
 | L5 | Face (orb UI, captions, tray, hotkeys) | not started |
@@ -38,6 +38,12 @@ cp .env.example .env            # add your keys (Gemini first: aistudio.google.c
 python -m atlas doctor          # what works on this machine, honestly
 python -m atlas chat            # talk to it — Darija by default, /help for commands
 python -m atlas chat --structured   # also get language/emotion metadata per turn
+
+python -m atlas audio devices   # is there a microphone, and can Python see it
+python -m atlas audio test      # record one second and play it back
+python -m atlas listen --status # wake engine, VAD backend, ASR mode, input devices
+python -m atlas listen          # say "atlas" and speak
+python -m atlas listen --ptt    # push-to-talk: press Enter, talk, press Enter
 ```
 
 Inside `chat`: `/lang en-GB` switches language, `/provider groq` pins a brain,
@@ -51,7 +57,15 @@ atlas ▸ safi, dakhla daba.
 
 A fresh clone with no keys still runs: `doctor` reports what is missing, and
 `chat` answers with one honest sentence instead of silence. Nothing pretends to
-work before its level lands — `atlas listen` says the ear arrives in L2.
+work before its level lands: `atlas listen --status` names the wake engine it
+will actually use, the VAD backend, and whether any cloud key is present.
+
+The ears need two optional extras, and say so rather than failing:
+
+```bash
+pip install -e "packages/atlas-audio[audio]"   # sounddevice + numpy: a microphone at all
+pip install -e "packages/atlas-audio[local]"   # sherpa-onnx (wake + VAD) and faster-whisper
+```
 
 What is real today: the kernel (`atlas-core`: contracts, event bus, FSM, leases,
 timings, config, fakes), the brain (`atlas-mind`: seven providers, quota/retry/

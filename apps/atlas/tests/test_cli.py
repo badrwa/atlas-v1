@@ -91,10 +91,15 @@ def test_doctor_reports_instead_of_crashing(vc) -> None:
     assert "config.toml" in out
 
 
-def test_doctor_says_which_piece_reaches_which_level(vc) -> None:
+def test_doctor_reports_the_ears_honestly(vc) -> None:
+    """L2 landed: doctor names the wake engine it will really use, and the VAD."""
     _, out = vc[1]("doctor")
-    assert "wake word" in out
-    assert "L2" in out, "the voice loop is L2; doctor must not pretend otherwise"
+    assert "wake word" in out  # the chosen engine
+    assert "vad" in out  # silero or the energy fallback, with the install line
+    # In CI neither sherpa-onnx nor a key exists, so the rows must say so rather
+    # than claim readiness.
+    assert "pip install" in out
+    assert "energy backend" in out or "silero" in out
 
 
 def test_doctor_warns_about_a_key_of_the_wrong_shape(

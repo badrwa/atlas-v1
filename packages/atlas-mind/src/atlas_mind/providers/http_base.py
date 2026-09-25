@@ -23,11 +23,12 @@ import httpx
 from atlas_core.config import ProviderConfig
 from atlas_core.contracts import HealthReport, LlmEvent, LlmProvider, LlmRequest
 from atlas_core.errors import AuthFailed, ProviderError, ProviderUnavailable, RateLimited
+from atlas_core.http import OwnedHttpClient
 
 log = logging.getLogger(__name__)
 
 
-class HttpStreamingProvider(LlmProvider):
+class HttpStreamingProvider(LlmProvider, OwnedHttpClient):
     """An LLM provider that streams server-sent events over HTTP."""
 
     def __init__(
@@ -37,27 +38,14 @@ class HttpStreamingProvider(LlmProvider):
         api_key: str = "",
         client: httpx.AsyncClient | None = None,
     ) -> None:
+        OwnedHttpClient.__init__(self, client, timeout_s=config.timeout_s)
         self.config = config
         self.name = config.name
         self.model = config.model
         self.supports_tools = config.supports_tools
         self.api_key = api_key
-        self._client = client
-        self._owns_client = client is None
 
     # ── plumbing ─────────────────────────────────────────────────────
-    @property
-    def client(self) -> httpx.AsyncClient:
-        if self._client is None:
-            self._client = httpx.AsyncClient(timeout=self.config.timeout_s)
-            self._owns_client = True
-        return self._client
-
-    async def aclose(self) -> None:
-        if self._client is not None and self._owns_client:
-            await self._client.aclose()
-            self._client = None
-
     async def health(self) -> HealthReport:
         """One cheap GET: did the credentials and the network both work?"""
         url = f"{self.config.base_url.rstrip('/')}/models"

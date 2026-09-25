@@ -6,12 +6,13 @@ One line of JSON per turn/stage in ``timings.jsonl``.  The plan's rule
 
 from __future__ import annotations
 
-import json
 import statistics
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from atlas_core.jsonl import JsonlLog
 
 
 @dataclass(slots=True)
@@ -33,31 +34,19 @@ class TimingRecord:
         return {k: v for k, v in asdict(self).items() if v is not None or k == "turn"}
 
 
-class TimingRecorder:
+class TimingRecorder(JsonlLog[TimingRecord]):
     """Append-only recorder + in-memory summary for the CLI/doctor.
 
     Writes are line-buffered and failure-tolerant: losing a timing line must
-    never break a conversation.
+    never break a conversation.  `load=False` by default — a summary is about
+    *this* run, unlike the wake log, which needs its history.
     """
 
     def __init__(self, path: str | Path = "timings.jsonl", *, enabled: bool = True) -> None:
-        self.path = Path(path)
-        self.enabled = enabled
-        self.records: list[TimingRecord] = []
+        super().__init__(path, enabled=enabled)
 
-    def add(self, record: TimingRecord) -> None:
-        self.records.append(record)
-        if not self.enabled:
-            return
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(record.as_dict(), ensure_ascii=False) + "\n")
-        except OSError:  # pragma: no cover - disk full / permission denied
-            self.enabled = False
-
-    def last(self) -> TimingRecord | None:
-        return self.records[-1] if self.records else None
+    def _from_dict(self, data: dict[str, Any]) -> TimingRecord:
+        return TimingRecord(**data)
 
     def summary(self) -> dict[str, dict[str, float]]:
         """p50/p95 per stage — the numbers you actually tune."""
@@ -73,7 +62,7 @@ class TimingRecorder:
                 out[stage] = {
                     "n": float(len(values)),
                     "p50": round(statistics.median(values), 1),
-                    "p95": round(_percentile(values, 95), 1),
+                    "p95": round(percentile(values, 95), 1),
                     "max": round(max(values), 1),
                 }
         return out
@@ -90,7 +79,14 @@ class TimingRecorder:
         return "\n".join(lines)
 
 
-def _percentile(values: list[float], pct: float) -> float:
+def percentile(values: list[float], pct: float) -> float:
+    """Linear-interpolated percentile.
+
+    Public because the ASR bench needs the same number the timing summary shows:
+    two definitions of p95 would let the notes and the CLI disagree.
+    """
+    if not values:
+        return 0.0
     if len(values) == 1:
         return values[0]
     ordered = sorted(values)
@@ -99,6 +95,10 @@ def _percentile(values: list[float], pct: float) -> float:
     high = min(low + 1, len(ordered) - 1)
     weight = rank - low
     return ordered[low] * (1 - weight) + ordered[high] * weight
+
+
+#: Kept so an old import keeps working; new code should use `percentile`.
+_percentile = percentile
 
 
 def now_iso() -> str:

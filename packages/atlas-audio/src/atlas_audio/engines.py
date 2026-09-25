@@ -1,25 +1,23 @@
-"""Engine slots for L2/L3 — declared, validated, and honestly not implemented.
+"""Engine slots that are still *planned* — declared, sized, and honestly empty.
 
-Why ship empty classes?  Because the contracts are the architecture (plan §4.1):
-declaring them now means `atlas doctor` can report exactly what is missing, the
-factory has fixed extension points, and L2/L3 become "fill in these five classes"
-instead of "design an audio layer".
+Why keep empty classes at all?  Because the contracts are the architecture
+(plan §4.1): declaring them means `atlas doctor` can report exactly what is
+missing, the factory has fixed extension points, and L3/L4 become "fill in these
+classes" instead of "design an audio layer".
 
-Every one of these raises `Unsupported` on `load()` until its level lands.
+**L2 is now real** — `frames`, `vad`, `wake`, `asr`, `postprocess` and `loop`
+carry the working implementations (`SileroVad`, `EnergyVad`, `SherpaKwsEngine`,
+`CloudRecognizer`, `LocalWhisperRecognizer`).  This file keeps only what later
+levels owe: the British voice (L3), the Darija voice sidecar (L3) and speaker
+verification (L4).  Two definitions of a `CloudRecognizer` in one package would
+be a bug, not a plan.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 
-from atlas_core.contracts import (
-    AudioChunk,
-    Detection,
-    LanguageTag,
-    ResourceCost,
-    SpeakerMatch,
-    Transcript,
-)
+from atlas_core.contracts import AudioChunk, LanguageTag, ResourceCost, SpeakerMatch
 from atlas_core.errors import Unsupported
 
 NOT_YET = "not implemented until {level} — see docs/levels/{file}"
@@ -29,8 +27,8 @@ class _PlannedEngine:
     """Shared behaviour: knows its budget, refuses to pretend it works."""
 
     name = "planned"
-    level = "L2"
-    level_file = "LEVEL-02-ears.md"
+    level = "L3"
+    level_file = "LEVEL-03-mouth.md"
     ram_mb = 0
     cold_start_s = 0.0
 
@@ -48,45 +46,6 @@ class _PlannedEngine:
 
     def cost_hint(self) -> ResourceCost:
         return ResourceCost(ram_mb=self.ram_mb, cold_start_s=self.cold_start_s)
-
-
-class SherpaKws(_PlannedEngine):
-    """Wake word 'atlas' via sherpa-onnx keyword spotting (L2)."""
-
-    name = "sherpa-kws"
-    ram_mb = 30
-
-
-class SileroVad(_PlannedEngine):
-    """Voice activity detection + endpointing (L2)."""
-
-    name = "silero-vad"
-    ram_mb = 20
-
-
-class LocalWhisperRecognizer(_PlannedEngine):
-    """Darija/English ASR via faster-whisper INT8 (L2) — Bunker mode."""
-
-    name = "whisper-local"
-    ram_mb = 400
-    cold_start_s = 3.0
-
-    async def transcribe(
-        self, audio: bytes, *, language: LanguageTag = "unknown", sample_rate: int = 16_000
-    ) -> Transcript:
-        raise Unsupported(NOT_YET.format(level="L2", file="LEVEL-02-ears.md"))
-
-
-class CloudRecognizer(_PlannedEngine):
-    """Darija-first ASR through Gemini / Groq (L2) — Lean mode."""
-
-    name = "asr-cloud"
-    ram_mb = 0
-
-    async def transcribe(
-        self, audio: bytes, *, language: LanguageTag = "unknown", sample_rate: int = 16_000
-    ) -> Transcript:
-        raise Unsupported(NOT_YET.format(level="L2", file="LEVEL-02-ears.md"))
 
 
 class SherpaSpeakerVerifier(_PlannedEngine):
@@ -139,25 +98,8 @@ class DarijaTtsSidecar(_PlannedVoice):
     cold_start_s = 8.0
 
 
-class WakeWordFeed:
-    """Minimal wake-word holder used by doctor/CLI before L2 exists."""
-
-    name = "wake"
-
-    def __init__(self, keyword: str = "atlas") -> None:
-        self.keyword = keyword
-
-    def feed(self, frame: bytes) -> Detection:  # pragma: no cover - L2 replaces this
-        return Detection()
-
-
 __all__ = [
-    "CloudRecognizer",
     "DarijaTtsSidecar",
-    "LocalWhisperRecognizer",
     "PiperSynthesizer",
-    "SherpaKws",
     "SherpaSpeakerVerifier",
-    "SileroVad",
-    "WakeWordFeed",
 ]

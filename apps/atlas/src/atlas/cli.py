@@ -443,10 +443,314 @@ def cmd_version(args: argparse.Namespace, console: Console) -> int:
     return 0
 
 
+# ── L2: the ears ─────────────────────────────────────────────────────
+def _ear_parts(config: AppConfig, console: Console, *, use_silero: bool = True):
+    """Build the whole listening chain, reporting what could not be built.
+
+    One function, used by `listen`, `audio replay` and `bench_asr.py`'s sibling
+    paths — so a machine that cannot do cloud ASR behaves the same everywhere.
+    """
+    from atlas_audio import (
+        SileroVad,
+        VadSegmenter,
+        build_recognizers,
+        build_wake_engine,
+    )
+    from atlas_audio.vad import SegmenterConfig as VadConfig
+
+    built = build_recognizers(config)
+    segmenter = VadSegmenter(VadConfig.from_config(config))
+    notes: list[str] = []
+    if use_silero and not segmenter.use_silero(SileroVad()):
+        notes.append("VAD: energy backend (sherpa-onnx Silero not installed)")
+    wake = build_wake_engine(config)
+    if wake.name == "energy-wake":
+        notes.append("wake: energy backend — a demo, not a keyword spotter")
+    return built, segmenter, wake, notes
+
+
+def cmd_audio(args: argparse.Namespace, console: Console) -> int:
+    """Device plumbing, the microphone self-test, and replaying a recording."""
+    from atlas_audio import check_audio_stack, list_devices
+    from atlas_audio.capture import platform_notes, self_test
+
+    action = args.audio_action
+
+    if action == "devices":
+        report = check_audio_stack()
+        console.title("Audio devices")
+        console.table(
+            ("state", "detail"),
+            [
+                ("sounddevice", "✓ installed" if report.sounddevice_available else "✗ missing"),
+                ("numpy", "✓ installed" if report.numpy_available else "✗ missing"),
+                ("inputs", str(len(report.inputs))),
+                ("outputs", str(len(report.outputs))),
+                ("host APIs", ", ".join(report.host_apis) or "—"),
+            ],
+        )
+        inputs, outputs, _host_apis = list_devices()
+        for device in inputs + outputs:
+            console.write(f"  {device.label()}")
+        for problem in report.problems:
+            console.warn("problem", problem)
+        if not report.ok:
+            console.write(f"  {console.paint('→ pip install atlas-audio[audio]', DIM)}")
+        console.write()
+        for note in platform_notes():
+            console.write(console.paint(f"  · {note}", DIM))
+        return 0 if report.ok else 1
+
+    if action == "test":
+        result = self_test(seconds=args.seconds)
+        console.title("Microphone self-test")
+        if result.ok:
+            console.ok("round trip", result.summary())
+            console.write(f"  {console.paint('→ now try: atlas listen --status', DIM)}")
+            return 0
+        console.fail("round trip", result.summary())
+        return 1
+
+    if action == "replay":
+        return _replay(args, console)
+
+    console.fail("audio", f"unknown action {action!r}")
+    return 1
+
+
+def _replay(args: argparse.Namespace, console: Console) -> int:
+    """Run a recording back through the whole chain — no microphone, no cloud."""
+    config = _load(args.config, console)
+    if config is None:
+        return 1
+
+    from atlas_audio import VoiceLoop, WavFile, load_session
+    from atlas_audio.loop import LoopConfig as VoiceLoopConfig
+
+    target = Path(args.path).expanduser()
+    if not target.exists():
+        console.fail("replay", f"no such file or directory: {target}")
+        return 1
+
+    frames = None
+    turns_recorded: list[dict] = []
+    if target.is_dir() or target.suffix == ".json":
+        session = load_session(target)
+        if session.audio is None:
+            console.fail("replay", "this session has no session.wav (record with --capture-dump)")
+            return 1
+        frames = session.audio.frames()
+        turns_recorded = session.turns
+    else:
+        frames = WavFile.read(target).frames()
+
+    built, segmenter, wake, notes = _ear_parts(config, console, use_silero=not args.no_silero)
+    processor = built["processor"].__class__.from_config(config)
+    loop = VoiceLoop(
+        wake=wake,
+        segmenter=segmenter,
+        recognizer=built["factory"],
+        processor=processor,
+        config=VoiceLoopConfig.from_config(config, followup_ms=args.followup_ms),
+    )
+    loop.arm()
+
+    if not built["factory"].candidates("ar-MA"):
+        console.fail("no ASR engine", "add a cloud key to .env, or install 'atlas-audio[local]'")
+        console.write(f"  {console.paint('→ atlas providers  shows which brains have keys', DIM)}")
+        return 1
+
+    console.title("Replay")
+    console.write(f"  {console.paint(f'{len(frames)} frames · {Path(target).name}', DIM)}")
+    for note in notes:
+        console.write(console.paint(f"  · {note}", DIM))
+    console.write()
+
+    turns = asyncio.run(loop.feed_frames(frames, source="replay"))
+    if not turns:
+        console.warn("nothing transcribed", "was the wake word in the recording?")
+        return 1
+    for turn in turns:
+        console.write(f"  [{turn.language} {turn.transcript.confidence:.2f} {turn.transcript.engine}] {turn.text}")
+    if turns_recorded:
+        console.write()
+        console.write(console.paint("  recorded vs replayed:", DIM))
+        for expected, turn in zip(turns_recorded, turns, strict=False):
+            mark = "✓" if expected.get("transcript", "") == turn.text else "≠"
+            console.write(f"   {mark} {expected.get('transcript', '')!r} → {turn.text!r}")
+    return 0
+
+
 def cmd_listen(args: argparse.Namespace, console: Console) -> int:
-    console.title("Listening")
-    console.warn("not yet", "the ear arrives in L2 (wake word, VAD, cloud ASR + local fallback)")
-    console.write(f"  {console.paint('what works now:', DIM)} atlas chat")
+    """The real thing: wake word, endpointing, ASR, and the L1 brain."""
+    config = _load(args.config, console)
+    if config is None:
+        return 1
+
+    from atlas_audio import (
+        TurnRecorder,
+        WakeLog,
+        build_recognizers,
+        list_devices,
+        wake_engine_status,
+    )
+    from atlas_audio.loop import LoopConfig as VoiceLoopConfig
+    from atlas_audio.loop import VoiceLoop
+
+    if args.status:
+        console.title("Ears")
+        rows = [(name, status) for name, status in wake_engine_status(config)]
+        console.table(("wake engine", "state"), rows)
+        built = build_recognizers(config)
+        policy = built["factory"].policy
+        console.write()
+        console.write(
+            f"  asr mode: {console.paint(policy.mode, DIM)} · "
+            f"cloud keys: {', '.join(built['cloud'].backends) or 'none'}"
+        )
+        inputs, _outputs, _host_apis = list_devices()
+        console.write(f"  input devices: {len(inputs)}")
+        for device in inputs[:4]:
+            console.write(console.paint(f"    · {device.label()}", DIM))
+        log = WakeLog()
+        console.write(f"  wake log: {len(log.hits)} hits · false-wake rate "
+                      f"{log.false_wake_rate(hours=4):.2f}/h over the last 4 h")
+        return 0
+
+    if args.replay:
+        args.path = args.replay
+        return _replay(args, console)
+
+    built, segmenter, wake, notes = _ear_parts(config, console, use_silero=not args.no_silero)
+    recorder = TurnRecorder("data/recordings", include_raw=args.capture_dump) if args.capture_dump else None
+
+    session, _router, _timings = _session(config, console)
+
+    async def respond(text: str, language: str):
+        async for delta in session.stream(text):
+            yield delta
+
+    def say(delta: str) -> None:
+        console.write(delta, end="")
+
+    loop = VoiceLoop(
+        wake=wake,
+        segmenter=segmenter,
+        recognizer=built["factory"],
+        respond=respond,
+        say=say,
+        processor=built["processor"],
+        recorder=recorder,
+        wake_log=WakeLog(),
+        config=VoiceLoopConfig.from_config(config, followup_ms=args.followup_ms, snappy=args.snappy),
+    )
+
+    console.title("ATLAS")
+    console.write(f"  {console.paint('say “atlas” and speak · Ctrl+C to stop', DIM)}")
+    for note in notes:
+        console.warn("degraded", note)
+    if recorder is not None:
+        console.write(console.paint(f"  recording every frame → {recorder.path}", DIM))
+    console.write()
+
+    if args.ptt:
+        return asyncio.run(_listen_ptt(loop, built, config, console, args))
+
+    return asyncio.run(
+        _listen_live(loop, built, config, console, args, recorder=recorder)
+    )
+
+
+async def _listen_live(loop, built, config, console: Console, args, *, recorder) -> int:
+    """Microphone → loop, until Ctrl+C or --max-turns."""
+    from atlas_audio import FrameBus, FrameProducer
+
+    bus = FrameBus()
+    producer = FrameProducer(bus, device=args.device or config.audio.input_device or None)
+
+    def on_error(exc: Exception) -> None:
+        console.fail("microphone", str(exc))
+
+    producer.on_error = on_error
+    producer.start()
+    stream = bus.stream()
+    try:
+        async for packet in stream:
+            if turn := await loop.feed(packet):
+                console.write(f"{console.paint('atlas ▸', CYAN)} {turn.reply}")
+                console.write()
+                if args.max_turns and len(loop.turns) >= args.max_turns:
+                    break
+    except KeyboardInterrupt:  # pragma: no cover - interactive
+        pass
+    finally:
+        producer.stop()
+        await stream.aclose()
+        if recorder:
+            path = recorder.flush()
+            if path:
+                console.write(console.paint(f"  session saved: {path.parent}", DIM))
+        if hasattr(built["factory"], "aclose"):
+            await built["factory"].aclose()
+        console.write()
+        console.ok("stopped", f"{len(loop.turns)} turns · {loop.wake_hits} wake hits")
+    return 0
+
+
+async def _listen_ptt(loop, built, config, console: Console, args) -> int:
+    """Terminal push-to-talk: Enter starts a recording, Enter ends it."""
+    from atlas_audio import FrameBus, FrameProducer
+    from atlas_audio.ptt import HOTKEYS, HotkeyListener, PushToTalk
+
+    bus = FrameBus()
+    producer = FrameProducer(bus, device=args.device or config.audio.input_device or None)
+    ptt = PushToTalk(loop)
+    listener = HotkeyListener(backend=None) if args.hotkeys else None
+    stop_flag = asyncio.Event()
+
+    def request_stop() -> None:  # pragma: no cover - from a hotkey thread
+        stop_flag.set()
+
+    if listener is not None and not listener.start(on_ask=lambda: ptt.begin(), on_stop=request_stop):
+        console.warn("hotkeys unavailable", "pip install 'atlas-audio[hotkeys]' — using Enter instead")
+        console.write(console.paint(f"  keys would be: {listener.describe()} ({HOTKEYS['ask']})", DIM))
+
+    producer.start()
+    stream = bus.stream()
+
+    async def consume() -> None:
+        async for packet in stream:
+            if ptt.recording:
+                ptt.push(packet.frame)
+            elif not listener and (turn := await loop.feed(packet)):
+                console.write(f"  [{turn.language}] {turn.text}")
+
+    consumer = asyncio.create_task(consume())
+    console.write()
+    try:
+        while True:
+            prompt = "press Enter to talk · q to quit ▸ "
+            answer = await asyncio.to_thread(input, prompt)
+            if answer.strip().lower() in {"q", "quit", "exit"}:
+                break
+            ptt.begin()
+            console.write(console.paint("  ● recording — Enter to stop", DIM))
+            await asyncio.to_thread(input)
+            frames = ptt.end()
+            console.write(console.paint(f"  {len(frames) * 80 / 1000:.1f}s captured", DIM))
+            if turn := await ptt.finish():
+                console.write(f"{console.paint('atlas ▸', CYAN)} {turn.reply}")
+            else:
+                console.warn("no utterance", "too short, or the VAD heard nothing")
+            console.write()
+    finally:
+        consumer.cancel()
+        producer.stop()
+        await stream.aclose()
+        if listener is not None:
+            listener.stop()
+        if hasattr(built["factory"], "aclose"):
+            await built["factory"].aclose()
     return 0
 
 
@@ -517,7 +821,30 @@ def build_parser() -> argparse.ArgumentParser:
     version.set_defaults(func=cmd_version)
 
     listen = sub.add_parser("listen", help="wake word + listening (L2)")
+    listen.add_argument("--status", action="store_true", help="what the ears can do, then exit")
+    listen.add_argument("--ptt", action="store_true", help="push-to-talk: press Enter to talk")
+    listen.add_argument("--replay", metavar="PATH", help="play a WAV or capture dump instead of the mic")
+    listen.add_argument("--capture-dump", action="store_true", help="record the whole session for replay")
+    listen.add_argument("--device", help="input device name or index")
+    listen.add_argument("--max-turns", type=int, default=0, help="stop after N turns (0 = forever)")
+    listen.add_argument("--followup-ms", type=int, default=None, help="post-reply grace window")
+    listen.add_argument("--snappy", action="store_true", help="end utterances after 350 ms of silence")
+    listen.add_argument("--no-silero", action="store_true", help="force the energy VAD")
+    listen.add_argument("--hotkeys", action="store_true", help="global hotkeys (needs the extra)")
     listen.set_defaults(func=cmd_listen)
+
+    audio = sub.add_parser("audio", help="devices, microphone self-test, replay")
+    audio.add_argument(
+        "audio_action",
+        nargs="?",
+        default="devices",
+        choices=["devices", "test", "replay"],
+    )
+    audio.add_argument("path", nargs="?", help="recording to replay (action: replay)")
+    audio.add_argument("--seconds", type=float, default=1.0, help="self-test capture length")
+    audio.add_argument("--no-silero", action="store_true", help="force the energy VAD")
+    audio.add_argument("--followup-ms", type=int, default=None)
+    audio.set_defaults(func=cmd_audio)
 
     return parser
 

@@ -24,9 +24,16 @@ confirm_frames = 2
 keywords = ["atlas", "hey atlas"]
 
 [vad]
-silence_ms = 500
-min_utterance_ms = 300
-max_utterance_ms = 12000
+silence_ms = 500              # how much quiet ends an utterance (350 feels "snappy")
+min_utterance_ms = 300        # below this it was a cough, not a command
+max_utterance_ms = 12000      # cut and let them continue
+energy_threshold = 0.012      # used when Silero is unavailable
+lead_in_ms = 200              # quiet kept in front of the first syllable
+
+[dialogue]
+followup_ms = 2500            # grace after a reply: no second "atlas" needed
+wake_guard_ms = 160           # frames dropped after the keyword (its own tail)
+chime = true                  # the tone that says "go ahead"
 
 [asr]
 mode = "cloud_first"          # cloud_first | local_first | cloud_only | local_only
@@ -34,6 +41,8 @@ cloud_order = ["gemini", "groq"]
 darija_model = "whisper-small-darija"   # local fallback (CTranslate2)
 english_model = "small.en"
 lease_ttl_s = 120
+lexicon_path = "data/lexicon.md"        # your corrections; also the ASR hotwords
+cloud_audio = true            # false = no audio leaves this machine, ever
 
 [tts]
 darija_engine = "darija_tts_sidecar"    # piper_arabic | darija_tts_sidecar | sapi

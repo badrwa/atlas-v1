@@ -12,6 +12,7 @@ Each ABC documents its **contract test** — the shared suite under
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from array import array
 from collections.abc import AsyncIterator, Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -274,13 +275,23 @@ class SpeechSynthesizer(Engine):
     ) -> Iterator[AudioChunk]: ...
 
 
+#: One audio frame, ready for a sense.  L2 fixed the shape — 80 ms of 16 kHz
+#: mono PCM — and int16 samples (`array("h")`) are the in-memory form the capture
+#: path uses, while `bytes` is what crosses a process or an API boundary.  The
+#: contract accepts both so neither side has to convert on the hot path.
+FeedFrame = bytes | array
+
+
 class WakeWordEngine(Sense):
     """Always-on, tiny, local.  Contract test: silence never fires a wake."""
 
     name = "wake"
+    #: What this engine is listening for — shown by `atlas doctor`, logged with
+    #: every hit, and the reason a hit is believable or not.
+    keywords: tuple[str, ...] = ()
 
     @abstractmethod
-    def feed(self, frame: bytes) -> Detection: ...
+    def feed(self, frame: FeedFrame) -> Detection: ...
 
 
 class SpeakerVerifier(Engine):

@@ -16,6 +16,7 @@ from atlas_core.contracts import (
     AudioChunk,
     DeclaredSkill,
     Detection,
+    FeedFrame,
     HealthReport,
     LlmEvent,
     LlmProvider,
@@ -37,6 +38,7 @@ from atlas_core.contracts import (
     Transcript,
     WakeWordEngine,
 )
+from atlas_core.engines import LoadedFlag
 from atlas_core.errors import ProviderUnavailable, RateLimited
 
 
@@ -136,14 +138,14 @@ class FakeWake(WakeWordEngine):
     def is_healthy(self) -> bool:
         return True
 
-    def feed(self, frame: bytes) -> Detection:
+    def feed(self, frame: FeedFrame) -> Detection:
         self.frames += 1
         if self.hit_at is not None and self.frames == self.hit_at:
             return Detection(hit=True, keyword=self.keyword, score=0.99)
         return Detection()
 
 
-class FakeEngineMixin:
+class FakeEngineMixin(LoadedFlag):
     """The engine lifecycle every fake shares: load, unload, is_loaded, cost_hint.
 
     Real engines do not share this — an ONNX session and an HTTP client have
@@ -156,15 +158,6 @@ class FakeEngineMixin:
     def _init_engine(self, cost_mb: int) -> None:
         self._loaded = False
         self._cost_mb = cost_mb
-
-    async def load(self) -> None:
-        self._loaded = True
-
-    async def unload(self) -> None:
-        self._loaded = False
-
-    def is_loaded(self) -> bool:
-        return self._loaded
 
     def cost_hint(self) -> ResourceCost:
         return ResourceCost(ram_mb=self._cost_mb, cold_start_s=self._cold_start_s)

@@ -59,6 +59,11 @@ class VadSection(BaseModel):
     silence_ms: int = 500
     min_utterance_ms: int = 300
     max_utterance_ms: int = 12_000
+    energy_threshold: float = 0.012
+    #: How much quiet may precede the first syllable of an utterance. The
+    #: pre-roll ring is 1.5 s so nothing is clipped; uploading all of it is not
+    #: the same thing.
+    lead_in_ms: int = 200
 
 
 class AsrSection(BaseModel):
@@ -67,6 +72,12 @@ class AsrSection(BaseModel):
     darija_model: str = "whisper-small-darija"
     english_model: str = "small.en"
     lease_ttl_s: int = 120
+    #: The owner-editable correction list (L2). It is also the hotword prompt
+    #: sent to cloud ASR, which is where most of the accuracy comes from.
+    lexicon_path: str = "data/lexicon.md"
+    #: The switch the orb shows a cloud glyph for. False = no audio leaves this
+    #: machine, full stop: `build_recognizers` then refuses to use the cloud.
+    cloud_audio: bool = True
 
 
 class TtsSection(BaseModel):
@@ -115,6 +126,17 @@ class ObsidianSection(BaseModel):
     @property
     def has_vault(self) -> bool:
         return bool(self.vault_path)
+
+
+class DialogueSection(BaseModel):
+    """Turn-taking timings — how long Atlas waits, and what it does about it."""
+
+    #: After a reply, this much grace before the wake word is needed again.
+    followup_ms: int = 2500
+    #: Frames dropped right after the wake word (the keyword's own tail).
+    wake_guard_ms: int = 160
+    #: A short tone when the wake word fires — the cheapest feedback there is.
+    chime: bool = True
 
 
 class GovernorSection(BaseModel):
@@ -189,6 +211,7 @@ class AppConfig(BaseModel):
     mind: MindSection = Field(default_factory=MindSection)
     obsidian: ObsidianSection = Field(default_factory=ObsidianSection)
     governor: GovernorSection = Field(default_factory=GovernorSection)
+    dialogue: DialogueSection = Field(default_factory=DialogueSection)
     ui: UiSection = Field(default_factory=UiSection)
     skills: SkillsSection = Field(default_factory=SkillsSection)
     providers: list[ProviderConfig] = Field(default_factory=list)

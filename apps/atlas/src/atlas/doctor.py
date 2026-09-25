@@ -185,11 +185,97 @@ def check_audio(report: Report) -> None:
             "audio",
             WARN,
             "no devices visible",
-            "voice lands in L2 — pip install 'atlas-audio[audio]' to try it",
+            "pip install 'atlas-audio[audio]' — or run `atlas audio devices` for the detail",
         )
         return
     apis = f" · {', '.join(host_apis)}" if host_apis else ""
     report.add("audio", OK, f"{len(microphones)} in, {len(speakers)} out{apis}")
+
+
+def check_ears(report: Report, config: AppConfig | None) -> None:
+    """The L2 rows: which wake engine, which VAD, and can any ASR run at all.
+
+    A missing optional extra is a *warning* with the exact install line, never a
+    failure: `atlas listen --ptt` works with the energy engines, and the cloud
+    answers for the local model.
+    """
+    try:
+        from atlas_audio import build_recognizers, build_wake_engine, wake_engine_status
+    except ImportError:
+        report.add("ears", WARN, "atlas-audio not installed")
+        return
+
+    wake = build_wake_engine(config)
+    if wake.name == "energy-wake":
+        report.add(
+            "wake word",
+            WARN,
+            "energy backend — fires on any loud speech",
+            "pip install 'atlas-audio[local]' for sherpa-onnx KWS (the real wake word)",
+        )
+    else:
+        report.add("wake word", OK, f"{wake.name} · listening for {', '.join(wake.keywords)}")
+
+    rows = dict(wake_engine_status(config))
+    for name, status in rows.items():
+        if name != wake.name and status.startswith("missing"):
+            report.add(f"wake · {name}", WARN, status, "optional — the chosen engine is above")
+
+    try:
+        built = build_recognizers(config)
+    except Exception as exc:
+        report.add("asr", WARN, f"could not build recognisers: {exc}")
+        return
+
+    policy = built["factory"].policy
+    local_ready = _module_present("faster_whisper")
+    problems: list[str] = []
+    if not built["cloud"].backends:
+        problems.append("no cloud key")
+    if not local_ready:
+        problems.append("faster-whisper not installed")
+    if policy.mode in ("cloud_first", "local_first") and problems:
+        report.add(
+            "asr",
+            WARN,
+            f"mode {policy.mode} · no engine ready ({', '.join(problems)})",
+            "add GEMINI_API_KEY to .env, or pip install 'atlas-audio[local]'",
+        )
+    elif policy.mode in ("cloud_only", "local_only") and problems and "faster-whisper" in problems[0]:
+        report.add("asr", WARN, f"mode {policy.mode} · cloud keys: {built['cloud'].backends or 'none'}")
+    else:
+        report.add("asr", OK, f"mode {policy.mode} · cloud: {', '.join(built['cloud'].backends) or '—'}")
+
+    try:
+        from atlas_audio import SileroVad
+
+        if SileroVad.available():
+            report.add("vad", OK, "silero (sherpa-onnx) · endpointing on real speech detection")
+        else:
+            report.add(
+                "vad",
+                WARN,
+                "energy backend — a loud room will cut words",
+                "pip install 'atlas-audio[local]' for Silero VAD",
+            )
+    except ImportError:  # pragma: no cover - atlas-audio is imported above
+        pass
+
+    report.add(
+        "privacy",
+        OK if config is not None and getattr(config.asr, "cloud_audio", True) else WARN,
+        "audio may go to the cloud after the wake word"
+        if config is not None and getattr(config.asr, "cloud_audio", True)
+        else "cloud audio off — nothing leaves this machine",
+    )
+
+
+def _module_present(name: str) -> bool:
+    try:
+        __import__(name)
+    except ImportError:
+        return False
+    return True
 
 
 def check_workspace(report: Report, config: AppConfig | None) -> None:
@@ -206,7 +292,12 @@ def check_workspace(report: Report, config: AppConfig | None) -> None:
     if config is not None:
         keywords = ", ".join(config.wake.keywords) or "—"
         state = "enabled" if config.wake.enabled else "disabled"
-        report.add("wake word", OK, f"{keywords} ({state}, listens from L2)")
+        report.add(
+            "wake config",
+            OK,
+            f"{keywords} ({state}, threshold {config.wake.threshold:.2f}, "
+            f"{config.wake.confirm_frames} frames)",
+        )
 
 
 def check_environment(report: Report) -> None:
@@ -241,6 +332,7 @@ def run_checks(*, config_path: str | None = None) -> Report:
     check_config(report, config, error)
     check_vault(report, config)
     check_audio(report)
+    check_ears(report, config)
     check_workspace(report, config)
     check_environment(report)
     return report
