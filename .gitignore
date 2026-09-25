@@ -1,0 +1,45 @@
+# ── secrets & local state (NEVER commit) ─────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── python ───────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.uv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── atlas runtime data ───────────────────────────────────────────────
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+logs/
+timings.jsonl
+*.log
+
+# ── models & local engines (huge, host-specific) ─────────────────────
+models/
+vendor/*/models/
+*.onnx
+*.gguf
+*.bin
+*.safetensors
+
+# ── editor / OS ──────────────────────────────────────────────────────
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

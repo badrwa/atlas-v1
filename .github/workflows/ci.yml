@@ -1,0 +1,81 @@
+name: ci
+
+on:
+  push:
+    branches: [main, "arena/**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONIOENCODING: "utf-8"
+
+jobs:
+  check:
+    name: lint · types · rules · tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.11"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      # Installed in dependency order so the resolver never reaches PyPI for a
+      # package that lives in this repo.
+      - name: Install workspace (editable)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e packages/atlas-core
+          python -m pip install -e packages/atlas-mind
+          python -m pip install -e packages/atlas-obsidian
+          python -m pip install -e packages/atlas-skills
+          python -m pip install -e packages/atlas-audio
+          python -m pip install -e packages/atlas-ui
+          python -m pip install -e apps/atlas
+          python -m pip install "pytest>=8.2" "pytest-asyncio>=0.23" "ruff>=0.5" "mypy>=1.10"
+
+      # These guard the architecture, not just the style: the core path must
+      # never drag in PyTorch, no layer may import the one above it, and no
+      # block of code may be copy-pasted.  They fail fastest, so they run first.
+      - name: Architecture rules
+        run: |
+          python scripts/check_import_rules.py
+          python scripts/check_no_torch.py
+          python scripts/check_duplicates.py
+
+      - name: Lint (ruff)
+        run: ruff check packages apps scripts
+
+      - name: Types (mypy)
+        run: mypy packages apps
+
+      - name: Tests (pytest)
+        run: pytest -m "not live and not hardware"
+
+  build:
+    name: uv build (every package)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - name: Build all packages
+        run: uv build --all-packages

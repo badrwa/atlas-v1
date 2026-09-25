@@ -1,0 +1,59 @@
+[project]
+name = "atlas-workspace"
+version = "0.0.0"
+description = "ATLAS — voice-first Darija/English assistant for a Dell Latitude 5480 (workspace root)"
+requires-python = ">=3.11"
+
+[tool.uv.workspace]
+members = ["packages/*", "apps/*"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "pre-commit>=3.7",
+]
+
+# ── lint / format ────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["packages", "apps"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RET", "PTH", "RUF"]
+# E501  long lines are fine
+# RUF001/2  Darija + Arabic text is not a typo
+# N818  exception names read better without an Error suffix (LeaseDenied, RateLimited)
+ignore = ["E501", "RUF001", "RUF002", "N818"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["atlas", "atlas_core", "atlas_mind", "atlas_audio", "atlas_obsidian", "atlas_skills", "atlas_ui"]
+
+# ── types ────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.11"
+warn_unused_configs = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
+ignore_missing_imports = true
+mypy_path = "packages/atlas-core/src:packages/atlas-mind/src:packages/atlas-audio/src:packages/atlas-obsidian/src:packages/atlas-skills/src:packages/atlas-ui/src"
+exclude = ["build/", "dist/", "\\.venv/"]
+
+# ── tests ────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["packages", "apps", "tests"]
+asyncio_mode = "auto"
+addopts = "-q --strict-markers"
+markers = [
+    "live: hits real cloud providers (needs keys, run with -m live)",
+    "hardware: needs a real microphone/speaker",
+    "slow: takes more than a few seconds",
+]
+filterwarnings = ["ignore::DeprecationWarning"]

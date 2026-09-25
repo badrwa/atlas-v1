@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<!--
+  The orb.  No framework, no bundler: one canvas, one caption card, and a
+  WebSocket to a loopback bridge that already decided everything here.
+
+  Rules this file obeys (LEVEL-05):
+    * state is motion, mood is hue — `orb.js` never invents either;
+    * captions are DOM, never canvas, so Arabic shaping and bidi work;
+    * 30 fps cap, and rendering stops when the window is hidden (2 Skylake cores).
+-->
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Atlas</title>
+    <link rel="stylesheet" href="/orb/orb.css?token=__TOKEN__" />
+  </head>
+  <body data-state="dormant" data-mood="calm" class="theme-transparent">
+    <main id="orb" class="orb" role="img" aria-live="polite" aria-label="Atlas state">
+      <canvas id="glow" class="layer glow" width="440" height="440"></canvas>
+      <canvas id="stage" class="layer stage" width="440" height="440"></canvas>
+      <div class="ring" aria-hidden="true"></div>
+      <div class="core" aria-hidden="true"></div>
+      <div id="flash" class="flash" aria-hidden="true"></div>
+    </main>
+
+    <section id="panel" class="panel" hidden>
+      <header class="panel-head">
+        <span id="mood-chip" class="chip mood">calm</span>
+        <span id="speaker-chip" class="chip speaker" hidden></span>
+        <span id="power-chips" class="chips">
+          <span id="mic-chip" class="chip mic" title="microphone">mic</span>
+          <span id="cloud-chip" class="chip cloud" title="what leaves the machine">cloud</span>
+        </span>
+      </header>
+      <p id="caption" class="caption" dir="auto" data-role="atlas"></p>
+      <p id="thought" class="thought" hidden></p>
+      <p id="degraded-chip" class="chip degraded" hidden></p>
+      <div id="confirm" class="confirm" hidden>
+        <p id="confirm-question" class="confirm-question" dir="auto"></p>
+        <div class="confirm-ring"><span id="confirm-count"></span></div>
+      </div>
+      <footer class="panel-foot">
+        <span id="link" class="link">connecting…</span>
+        <span class="foot-keys">Ctrl+Alt+M mute · Ctrl+Alt+Space talk · Ctrl+Alt+S stop</span>
+      </footer>
+    </section>
+
+    <script type="module">
+      import { startOrb } from "/orb/orb.js?token=__TOKEN__";
+      startOrb({ token: "__TOKEN__" });
+    </script>
+  </body>
+</html>

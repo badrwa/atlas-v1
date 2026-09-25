@@ -1,0 +1,41 @@
+[project]
+name = "atlas-audio"
+version = "0.1.0"
+description = "Atlas ears and mouth: wake word, VAD, Darija/English ASR, Piper + DarijaTTS synthesis"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "atlas-core",
+]
+
+[project.optional-dependencies]
+# "audio" is the floor: without it there is no microphone at all.
+audio = [
+    "sounddevice>=0.4.6",
+    "numpy>=1.26",
+    "webrtcvad-wheels>=2.0.14",
+]
+# "local" is everything that runs offline on the CPU: the wake word and Silero
+# VAD (sherpa-onnx — one runtime for KWS, VAD, speaker ID and offline ASR), the
+# Darija ASR fallback (faster-whisper int8), and the British voice (Piper).
+# No torch anywhere: onnxruntime and CTranslate2 are what make 8 GB enough.
+local = [
+    "sherpa-onnx>=1.10",
+    "faster-whisper>=1.0",
+    "onnxruntime>=1.18",
+    "piper-tts>=1.2",
+]
+# openWakeWord is the interchangeable second wake engine (L2) and the training
+# route for a custom "atlas" model (L9).
+openwakeword = ["openwakeword>=0.6"]
+# Global hotkeys (Ctrl+Alt+Space/M/S). Terminal push-to-talk needs nothing.
+hotkeys = ["keyboard>=0.13.5"]
+all = ["atlas-audio[audio,local,openwakeword,hotkeys]"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/atlas_audio"]

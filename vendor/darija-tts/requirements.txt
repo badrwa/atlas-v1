@@ -1,0 +1,7 @@
+# The ONLY place Atlas allows a heavy inference stack (plan anti-pattern #1).
+# Nothing here is imported by the core environment: this venv is a separate
+# process that Atlas talks to over localhost HTTP.
+outetts>=0.2.0
+llama-cpp-python>=0.2.79
+soundfile>=0.12
+numpy>=1.26

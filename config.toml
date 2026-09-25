@@ -1,0 +1,211 @@
+# ─────────────────────────────────────────────────────────────────────
+#  ATLAS — runtime configuration (no secrets here, ever; see .env)
+#  Load order:  defaults < this file < environment variables < CLI flags
+# ─────────────────────────────────────────────────────────────────────
+
+[app]
+profile = "lean"              # lean (cloud-first) | bunker (offline-first)
+language = "ar-MA"            # default reply language (Moroccan Darija)
+secondary_language = "en-GB"
+call_name = "صاحبي"
+
+[audio]
+# Leave blank to use the Windows default device.
+input_device = ""
+output_device = ""
+sample_rate = 16000
+frame_ms = 80
+pre_roll_ms = 1500
+
+[wake]
+enabled = true
+threshold = 0.60
+confirm_frames = 2
+keywords = ["atlas", "hey atlas"]
+
+[vad]
+silence_ms = 500              # how much quiet ends an utterance (350 feels "snappy")
+min_utterance_ms = 300        # below this it was a cough, not a command
+max_utterance_ms = 12000      # cut and let them continue
+energy_threshold = 0.012      # used when Silero is unavailable
+lead_in_ms = 200              # quiet kept in front of the first syllable
+
+[dialogue]
+followup_ms = 2500            # grace after a reply: no second "atlas" needed
+wake_guard_ms = 160           # frames dropped after the keyword (its own tail)
+chime = true                  # the tone that says "go ahead"
+
+[asr]
+mode = "cloud_first"          # cloud_first | local_first | cloud_only | local_only
+cloud_order = ["gemini", "groq"]
+darija_model = "whisper-small-darija"   # local fallback (CTranslate2)
+english_model = "small.en"
+lease_ttl_s = 120
+lexicon_path = "data/lexicon.md"        # your corrections; also the ASR hotwords
+cloud_audio = true            # false = no audio leaves this machine, ever
+
+[identity]
+enabled = true                          # false = single user, full access (L3 behaviour)
+owner_name = ""                         # filled by `atlas identity enrol`
+threshold = 0.65                        # cosine; tune with scripts/bench_speaker.py
+trust_min_ms = 1000                     # shorter utterances never carry owner-only actions
+model_path = "models/speaker/3dspeaker_speech_eres2net_base.onnx"
+profiles_path = "data/speakers.sqlite3" # biometrics: local, gitignored, never the vault
+log_path = "data/speaker_log.jsonl"
+window = 6                              # embeddings kept per person (drift handling)
+enrol_samples = 3
+enrol_seconds = 10.0
+enrol_min_speech_ms = 2500
+quality_floor = 0.55                    # pairwise similarity floor for an enrolment
+drift_rejections = 2                    # twice rejected in a session → offer re-enrolment
+greet_once_per_day = true
+guest_pc_control = false                # known others: SAFE PC skills, never CONFIRM
+
+[tts]
+darija_engine = "darija_tts_sidecar"    # darija_tts_sidecar | piper_arabic | sapi
+english_engine = "piper"                # piper | sapi
+english_voice = "en_GB-alan-medium"     # any en_GB voice in models_dir
+darija_voice = "darija"
+models_dir = "models/tts"
+arabic_voice = "ar_JO-kareem-medium"    # the offline bootstrap for Darija
+sapi_voice = ""                         # e.g. "Microsoft Hazel Desktop"
+cache_path = "data/tts-cache.sqlite3"
+cache_max_mb = 300
+realtime_streaming = true
+max_sentences = 3                       # then Atlas asks "bghiti nkemmel?"
+ask_to_continue = true
+prosody = true
+quiet_hours = ["22:30", "07:00"]        # softer, quieter after this hour
+gain = 1.0
+barge_in = false                        # stop words need echo cancellation; off — the stop hotkey (Ctrl+Alt+S) always works
+stop_words = ["stop", "safi", "skut"]
+prefetch = 2                            # sentences held ahead of playback
+sidecar_url = "http://127.0.0.1:8125"
+sidecar_python = "vendor/darija-tts/.venv/Scripts/python.exe"
+#sidecar_command = ["{python}", "-m", "darija_tts.server", "--port", "8125"]
+sidecar_timeout_s = 30.0
+sidecar_autostart = true
+
+[mind]
+provider_order = ["gemini", "groq", "openrouter", "together", "huggingface", "ollama", "llamacpp"]
+temperature = 0.7
+max_output_tokens = 512
+request_timeout_s = 20.0
+max_tool_iterations = 3
+context_token_budget = 1200
+memory_token_budget = 400
+first_token_budget_ms = 1500
+
+[mind.dialect]
+code_switch = true
+script = "arabic"             # arabic | arabizi  (how Atlas writes caption text)
+
+[obsidian]
+vault_path = ""               # set by `python -m atlas vault init <path>`
+folder_inbox = "00_Inbox"
+folder_daily = "10_Daily"
+folder_notes = "20_Notes"
+folder_people = "30_People"
+folder_projects = "40_Projects"
+folder_atlas = "50_Atlas"
+folder_archive = "90_Archive"
+git_commit_writes = true
+rest_api_url = "https://127.0.0.1:27124"
+watch_vault = true
+
+[governor]
+ram_floor_mb = 400
+idle_lease_ttl_s = 120
+watch_interval_s = 5
+degrade_below_mb = 500
+
+[ui]
+enabled = false               # L5 — orb window
+always_on_top = true
+orb_size_px = 220
+fps_cap = 30
+cloud_glyph = true
+
+[skills]
+dry_run = false               # true = log actions instead of executing them
+workspace_dir = ""            # extra folder Atlas may write to (besides the vault)
+
+# ── LLM providers ────────────────────────────────────────────────────
+# One class (OpenAI-compatible) serves every provider below; api_key_env
+# names the variable in .env.  Add/remove providers freely.
+
+[[providers]]
+name = "gemini"
+kind = "gemini"
+model = "gemini-2.5-flash-lite"
+api_key_env = "GEMINI_API_KEY"
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+timeout_s = 20.0
+max_output_tokens = 512
+daily_request_cap = 1000
+supports_tools = true
+
+[[providers]]
+name = "groq"
+kind = "openai_compatible"
+model = "llama-3.3-70b-versatile"
+api_key_env = "GROQ_API_KEY"
+base_url = "https://api.groq.com/openai/v1"
+timeout_s = 15.0
+max_output_tokens = 512
+daily_request_cap = 1000
+supports_tools = true
+
+[[providers]]
+name = "openrouter"
+kind = "openai_compatible"
+model = "meta-llama/llama-3.1-8b-instruct:free"
+api_key_env = "OPENROUTER_API_KEY"
+base_url = "https://openrouter.ai/api/v1"
+timeout_s = 25.0
+max_output_tokens = 512
+daily_request_cap = 50
+supports_tools = false
+
+[[providers]]
+name = "together"
+kind = "openai_compatible"
+model = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+api_key_env = "TOGETHER_API_KEY"
+base_url = "https://api.together.xyz/v1"
+timeout_s = 25.0
+max_output_tokens = 512
+supports_tools = true
+
+[[providers]]
+name = "huggingface"
+kind = "openai_compatible"
+model = "meta-llama/Llama-3.1-8B-Instruct"
+api_key_env = "HUGGINGFACE_API_KEY"
+base_url = "https://router.huggingface.co/v1"
+timeout_s = 30.0
+max_output_tokens = 512
+daily_request_cap = 100
+supports_tools = false
+
+[[providers]]
+name = "ollama"
+kind = "openai_compatible"
+model = "llama3.2"
+api_key_env = ""
+base_url = "http://127.0.0.1:11434/v1"
+timeout_s = 60.0
+max_output_tokens = 512
+enabled = false               # turn on when Ollama is installed
+supports_tools = false
+
+[[providers]]
+name = "llamacpp"
+kind = "llama_cpp"            # owns a process, not just a URL (see providers/llama_cpp.py)
+model = "qwen3-1.7b-q4_k_m"
+api_key_env = ""
+base_url = "http://127.0.0.1:8123/v1"
+timeout_s = 120.0             # a 2-core Skylake is slow on the first tokens
+max_output_tokens = 512
+enabled = false               # Bunker brain: leased on demand, unloaded when idle
+supports_tools = false
