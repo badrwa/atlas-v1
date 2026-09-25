@@ -1,0 +1,167 @@
+# ─────────────────────────────────────────────────────────────────────
+#  ATLAS — runtime configuration (no secrets here, ever; see .env)
+#  Load order:  defaults < this file < environment variables < CLI flags
+# ─────────────────────────────────────────────────────────────────────
+
+[app]
+profile = "lean"              # lean (cloud-first) | bunker (offline-first)
+language = "ar-MA"            # default reply language (Moroccan Darija)
+secondary_language = "en-GB"
+call_name = "صاحبي"
+
+[audio]
+# Leave blank to use the Windows default device.
+input_device = ""
+output_device = ""
+sample_rate = 16000
+frame_ms = 80
+pre_roll_ms = 1500
+
+[wake]
+enabled = true
+threshold = 0.60
+confirm_frames = 2
+keywords = ["atlas", "hey atlas"]
+
+[vad]
+silence_ms = 500
+min_utterance_ms = 300
+max_utterance_ms = 12000
+
+[asr]
+mode = "cloud_first"          # cloud_first | local_first | cloud_only | local_only
+cloud_order = ["gemini", "groq"]
+darija_model = "whisper-small-darija"   # local fallback (CTranslate2)
+english_model = "small.en"
+lease_ttl_s = 120
+
+[tts]
+darija_engine = "darija_tts_sidecar"    # piper_arabic | darija_tts_sidecar | sapi
+english_engine = "piper"
+english_voice = "en_GB-alan-medium"
+cache_max_mb = 300
+realtime_streaming = true
+
+[mind]
+provider_order = ["gemini", "groq", "openrouter", "together", "huggingface", "ollama", "llamacpp"]
+temperature = 0.7
+max_output_tokens = 512
+request_timeout_s = 20.0
+max_tool_iterations = 3
+context_token_budget = 1200
+memory_token_budget = 400
+first_token_budget_ms = 1500
+
+[mind.dialect]
+code_switch = true
+script = "arabic"             # arabic | arabizi  (how Atlas writes caption text)
+
+[obsidian]
+vault_path = ""               # set by `python -m atlas vault init <path>`
+folder_inbox = "00_Inbox"
+folder_daily = "10_Daily"
+folder_notes = "20_Notes"
+folder_people = "30_People"
+folder_projects = "40_Projects"
+folder_atlas = "50_Atlas"
+folder_archive = "90_Archive"
+git_commit_writes = true
+rest_api_url = "https://127.0.0.1:27124"
+watch_vault = true
+
+[governor]
+ram_floor_mb = 400
+idle_lease_ttl_s = 120
+watch_interval_s = 5
+degrade_below_mb = 500
+
+[ui]
+enabled = false               # L5 — orb window
+always_on_top = true
+orb_size_px = 220
+fps_cap = 30
+cloud_glyph = true
+
+[skills]
+dry_run = false               # true = log actions instead of executing them
+workspace_dir = ""            # extra folder Atlas may write to (besides the vault)
+
+# ── LLM providers ────────────────────────────────────────────────────
+# One class (OpenAI-compatible) serves every provider below; api_key_env
+# names the variable in .env.  Add/remove providers freely.
+
+[[providers]]
+name = "gemini"
+kind = "gemini"
+model = "gemini-2.5-flash-lite"
+api_key_env = "GEMINI_API_KEY"
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+timeout_s = 20.0
+max_output_tokens = 512
+daily_request_cap = 1000
+supports_tools = true
+
+[[providers]]
+name = "groq"
+kind = "openai_compatible"
+model = "llama-3.3-70b-versatile"
+api_key_env = "GROQ_API_KEY"
+base_url = "https://api.groq.com/openai/v1"
+timeout_s = 15.0
+max_output_tokens = 512
+daily_request_cap = 1000
+supports_tools = true
+
+[[providers]]
+name = "openrouter"
+kind = "openai_compatible"
+model = "meta-llama/llama-3.1-8b-instruct:free"
+api_key_env = "OPENROUTER_API_KEY"
+base_url = "https://openrouter.ai/api/v1"
+timeout_s = 25.0
+max_output_tokens = 512
+daily_request_cap = 50
+supports_tools = false
+
+[[providers]]
+name = "together"
+kind = "openai_compatible"
+model = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+api_key_env = "TOGETHER_API_KEY"
+base_url = "https://api.together.xyz/v1"
+timeout_s = 25.0
+max_output_tokens = 512
+supports_tools = true
+
+[[providers]]
+name = "huggingface"
+kind = "openai_compatible"
+model = "meta-llama/Llama-3.1-8B-Instruct"
+api_key_env = "HUGGINGFACE_API_KEY"
+base_url = "https://router.huggingface.co/v1"
+timeout_s = 30.0
+max_output_tokens = 512
+daily_request_cap = 100
+supports_tools = false
+
+[[providers]]
+name = "ollama"
+kind = "openai_compatible"
+model = "llama3.2"
+api_key_env = ""
+base_url = "http://127.0.0.1:11434/v1"
+timeout_s = 60.0
+max_output_tokens = 512
+enabled = false               # turn on when Ollama is installed
+supports_tools = false
+
+[[providers]]
+name = "llamacpp"
+kind = "openai_compatible"
+model = "local-gguf"
+api_key_env = ""
+base_url = "http://127.0.0.1:8123/v1"
+timeout_s = 60.0
+max_output_tokens = 512
+enabled = false               # Bunker brain, started by the ResourceGovernor
+supports_tools = false

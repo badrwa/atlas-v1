@@ -1,0 +1,25 @@
+[project]
+name = "atlas-app"
+version = "0.1.0"
+description = "Atlas CLI: doctor, providers, chat, vault, skills"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "atlas-core",
+    "atlas-mind",
+    "atlas-obsidian",
+    "atlas-skills",
+    "atlas-audio",
+    "atlas-ui",
+    "psutil>=5.9",
+]
+
+[project.scripts]
+atlas = "atlas.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/atlas"]
