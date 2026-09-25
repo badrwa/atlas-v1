@@ -11,58 +11,23 @@ Streaming is SSE (`data: {...}` lines terminated by `data: [DONE]`).
 from __future__ import annotations
 
 import json
-import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
-import httpx
-
-from atlas_core.config import ProviderConfig
 from atlas_core.contracts import (
-    HealthReport,
     LlmEvent,
-    LlmProvider,
     LlmRequest,
     StreamEnd,
     TextDelta,
     ToolCallRequest,
     Usage,
 )
-from atlas_core.errors import AuthFailed, ProviderError, ProviderUnavailable, RateLimited
 
-log = logging.getLogger(__name__)
+from .http_base import HttpStreamingProvider
 
 
-class OpenAiCompatibleProvider(LlmProvider):
+class OpenAiCompatibleProvider(HttpStreamingProvider):
     """Any backend exposing `POST {base_url}/chat/completions` with SSE."""
-
-    def __init__(
-        self,
-        config: ProviderConfig,
-        *,
-        api_key: str = "",
-        client: httpx.AsyncClient | None = None,
-    ) -> None:
-        self.config = config
-        self.name = config.name
-        self.model = config.model
-        self.supports_tools = config.supports_tools
-        self.api_key = api_key
-        self._client = client
-        self._owns_client = client is None
-
-    # ── plumbing ─────────────────────────────────────────────────────
-    @property
-    def client(self) -> httpx.AsyncClient:
-        if self._client is None:
-            self._client = httpx.AsyncClient(timeout=self.config.timeout_s)
-            self._owns_client = True
-        return self._client
-
-    async def aclose(self) -> None:
-        if self._client is not None and self._owns_client:
-            await self._client.aclose()
-            self._client = None
 
     def _headers(self) -> dict[str, str]:
         headers = {
@@ -120,35 +85,12 @@ class OpenAiCompatibleProvider(LlmProvider):
         finish_reason = "stop"
         ended = False
 
-        try:
-            async with self.client.stream(
-                "POST", url, headers=self._headers(), json=self._payload(request)
-            ) as response:
-                if response.status_code >= 400:
-                    raise self._map_error(response.status_code, await response.aread())
-
-                async for line in response.aiter_lines():
-                    if not line or not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data)
-                    except json.JSONDecodeError:
-                        log.debug("bad_sse_chunk provider=%s", self.name)
-                        continue
-
-                    for event in self._events_from_chunk(chunk, tool_calls):
-                        if isinstance(event, StreamEnd):
-                            finish_reason = event.reason
-                            ended = True
-                        yield event
-
-        except httpx.TimeoutException as exc:
-            raise ProviderUnavailable(f"{self.name} timed out: {exc}") from exc
-        except httpx.HTTPError as exc:
-            raise ProviderUnavailable(f"{self.name} transport error: {exc}") from exc
+        async for chunk in self._stream_chunks(url, self._payload(request)):
+            for event in self._events_from_chunk(chunk, tool_calls):
+                if isinstance(event, StreamEnd):
+                    finish_reason = event.reason
+                    ended = True
+                yield event
 
         for event in self._flush_tool_calls(tool_calls):
             yield event
@@ -156,8 +98,9 @@ class OpenAiCompatibleProvider(LlmProvider):
             yield StreamEnd(reason=finish_reason)
 
     def _events_from_chunk(
-        self, chunk: dict[str, Any], tool_calls: dict[int, dict[str, Any]]
+        self, chunk: dict[str, Any], tool_calls: dict[int, dict[str, Any]] | None = None
     ) -> list[LlmEvent]:
+        tool_calls = tool_calls if tool_calls is not None else {}
         events: list[LlmEvent] = []
         if usage := chunk.get("usage"):
             events.append(
@@ -183,6 +126,7 @@ class OpenAiCompatibleProvider(LlmProvider):
 
     @staticmethod
     def _flush_tool_calls(tool_calls: dict[int, dict[str, Any]]) -> list[LlmEvent]:
+        """Streamed tool calls arrive in fragments; emit them once, complete."""
         events: list[LlmEvent] = []
         for index in sorted(tool_calls):
             slot = tool_calls[index]
@@ -194,27 +138,6 @@ class OpenAiCompatibleProvider(LlmProvider):
                 arguments = {"_raw": slot["arguments"]}
             events.append(ToolCallRequest(name=slot["name"], arguments=arguments))
         return events
-
-    @staticmethod
-    def _map_error(status: int, body: bytes) -> ProviderError:
-        detail = body.decode("utf-8", "replace")[:300]
-        if status in (401, 403):
-            return AuthFailed(f"auth failed ({status}): {detail}")
-        if status == 429:
-            return RateLimited(f"rate limited: {detail}")
-        if status >= 500:
-            return ProviderUnavailable(f"upstream {status}: {detail}")
-        return ProviderError(f"http {status}: {detail}")
-
-    # ── health ───────────────────────────────────────────────────────
-    async def health(self) -> HealthReport:
-        url = f"{self.config.base_url.rstrip('/')}/models"
-        try:
-            response = await self.client.get(url, headers=self._headers(), timeout=5.0)
-        except httpx.HTTPError as exc:
-            return HealthReport(ok=False, detail=str(exc)[:120])
-        ok = response.status_code < 400
-        return HealthReport(ok=ok, detail=f"http {response.status_code}")
 
 
 __all__ = ["OpenAiCompatibleProvider"]

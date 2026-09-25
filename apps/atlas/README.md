@@ -1,19 +1,19 @@
-# atlas (app)
+# atlas-app
 
-The composition root: config loading, dependency wiring, and the CLI you actually
-type.
+The command line you actually type. Everything here is a thin shell over the
+packages — if a command needs logic, that logic belongs in a package where tests
+can reach it.
 
 ```bash
-python -m atlas doctor                 # hardware, keys, vault, audio, import rules
-python -m atlas providers              # what is configured (add --live to call it)
-python -m atlas chat                   # text conversation (L1)
-python -m atlas vault init D:\AtlasVault
-python -m atlas vault status
-python -m atlas vault undo
-python -m atlas skills
-python -m atlas ui-protocol
-python -m atlas listen                 # says "arrives in L2" — no fake audio yet
+python -m atlas doctor          # what works on this machine, honestly
+python -m atlas providers       # configured providers, keys, fallback order
+python -m atlas chat            # talk to Atlas (streaming, Darija by default)
+python -m atlas vault init ~/AtlasVault
+python -m atlas skills          # what Atlas can do, and what needs confirmation
+python -m atlas ui-protocol     # regenerate the UI TypeScript contract
 ```
 
-Everything here is wiring. If logic starts accumulating in this package it
-belongs in one of the packages under `packages/` instead.
+Global flags: `--config PATH` (or `ATLAS_CONFIG`), `--verbose`.
+
+`doctor` exits 1 only when something is actually broken. Warnings are things you
+can run without (no microphone yet, no vault configured, a key that looks wrong).

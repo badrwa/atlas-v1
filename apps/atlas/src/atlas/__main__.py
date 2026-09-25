@@ -1,4 +1,4 @@
-"""Entry point: `python -m atlas <command>`."""
+"""`python -m atlas` — same entry point as the `atlas` script."""
 
 from __future__ import annotations
 

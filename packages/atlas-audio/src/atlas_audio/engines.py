@@ -106,7 +106,20 @@ class SherpaSpeakerVerifier(_PlannedEngine):
         raise Unsupported(NOT_YET.format(level="L4", file="LEVEL-04-identity.md"))
 
 
-class PiperSynthesizer(_PlannedEngine):
+class _PlannedVoice(_PlannedEngine):
+    """Shared body for the two voices that do not exist yet.
+
+    Piper and the Darija sidecar differ in *what they are* (language, model,
+    RAM budget) — not in how they refuse to work before L3 lands.
+    """
+
+    def synthesize(
+        self, text: str, *, voice: str = "", language: LanguageTag = "ar-MA"
+    ) -> Iterator[AudioChunk]:
+        raise Unsupported(NOT_YET.format(level=self.level, file=self.level_file))
+
+
+class PiperSynthesizer(_PlannedVoice):
     """British English voice, ONNX, realtime on this CPU (L3)."""
 
     name = "piper"
@@ -115,13 +128,8 @@ class PiperSynthesizer(_PlannedEngine):
     ram_mb = 150
     cold_start_s = 0.5
 
-    def synthesize(
-        self, text: str, *, voice: str = "", language: LanguageTag = "en-GB"
-    ) -> Iterator[AudioChunk]:
-        raise Unsupported(NOT_YET.format(level="L3", file="LEVEL-03-mouth.md"))
 
-
-class DarijaTtsSidecar(_PlannedEngine):
+class DarijaTtsSidecar(_PlannedVoice):
     """Moroccan Darija voice (DarijaTTS-500M via llama.cpp) in an isolated venv (L3)."""
 
     name = "darija-tts"
@@ -129,11 +137,6 @@ class DarijaTtsSidecar(_PlannedEngine):
     level_file = "LEVEL-03-mouth.md"
     ram_mb = 700
     cold_start_s = 8.0
-
-    def synthesize(
-        self, text: str, *, voice: str = "", language: LanguageTag = "ar-MA"
-    ) -> Iterator[AudioChunk]:
-        raise Unsupported(NOT_YET.format(level="L3", file="LEVEL-03-mouth.md"))
 
 
 class WakeWordFeed:

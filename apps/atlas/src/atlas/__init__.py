@@ -1,4 +1,4 @@
-"""Atlas application layer — the composition root and the CLI."""
+"""Atlas command line app."""
 
 __version__ = "0.1.0"
 

@@ -1,415 +1,488 @@
-"""Atlas CLI — `python -m atlas <command>`.
+"""The `atlas` command.
 
-L0/L1 commands: doctor, providers, chat, vault, skills, ui-protocol, version.
-`listen` (voice) arrives in L2; the command exists and says so honestly.
+Everything here is wiring: config in, package out, result printed.  If a command
+grows logic worth testing, it moves into a package — which is why `doctor.py`
+lives next door and this file mostly parses arguments and formats output.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from atlas import console
-from atlas.doctor import run_checks
+from atlas import __version__
+from atlas.console import CYAN, DIM, Console
+from atlas_core.config import AppConfig, ConfigError, load_config
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
-VERSION = "0.1.0"
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    pass
 
-
-# ── helpers ──────────────────────────────────────────────────────────
-def _config_path() -> Path:
-    """ATLAS_CONFIG wins, then ./config.toml (so tests can use a sandbox config)."""
-    import os
-
-    return Path(os.environ.get("ATLAS_CONFIG") or (Path.cwd() / "config.toml"))
+USAGE_HINT = "config: config.toml (override with --config or $ATLAS_CONFIG)"
 
 
-def _load_config():
-    from atlas_core.config import ConfigError, load_config
-
+# ── shared plumbing ──────────────────────────────────────────────────
+def _load(config_path: str | None, console: Console) -> AppConfig | None:
     try:
-        return load_config(_config_path()), None
+        return load_config(config_path)
     except ConfigError as exc:
-        return None, str(exc)
+        console.fail("config", str(exc))
+        console.write(f"  {console.paint('→ copy config.toml from the repo root, then retry', DIM)}")
+        return None
 
 
-def _build_router(config):
+def _session(config: AppConfig, console: Console):
+    """Build a chat session wired to every provider that has a key."""
     from atlas_core.events import EventBus
-    from atlas_core.fakes import FakeProvider
     from atlas_core.timings import TimingRecorder
-    from atlas_mind.providers.factory import build_providers
-    from atlas_mind.router import ProviderRouter, QuotaTracker
+    from atlas_mind import ChatSession, ProviderRouter, build_providers
+    from atlas_mind.router import QuotaTracker
 
     providers = build_providers(config)
-    if not providers:
-        providers = [FakeProvider(name="offline")]
+    tracker = QuotaTracker(Path("data/quota.json"))
     events = EventBus()
-    timings = TimingRecorder(config_path_timings())
-    return ProviderRouter(
+    timings = TimingRecorder()
+    router = ProviderRouter(
         providers,
-        tracker=QuotaTracker(),
+        tracker=tracker,
         events=events,
         fallback_language=config.app.language,
-    ), timings
-
-
-def config_path_timings() -> Path:
-    directory = Path("data")
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory / "timings.jsonl"
+    )
+    session = ChatSession(config, router, timings=timings, events=events)
+    return session, router, timings
 
 
 # ── commands ─────────────────────────────────────────────────────────
-def cmd_doctor(args: argparse.Namespace) -> int:
-    config, error = _load_config()
-    report = run_checks(config)
-    console.write(report.render())
-    if error:
-        console.write(console.fail(f"config error: {error}"))
-        return 1
+def cmd_doctor(args: argparse.Namespace, console: Console) -> int:
+    from atlas.doctor import render, run_checks
+
+    report = run_checks(config_path=args.config)
+    render(report, console, config_path=args.config or "config.toml")
     return 1 if report.failures else 0
 
 
-def cmd_providers(args: argparse.Namespace) -> int:
-    config, error = _load_config()
-    if error or config is None:
-        console.write(console.fail(f"config error: {error}"))
+def cmd_providers(args: argparse.Namespace, console: Console) -> int:
+    config = _load(args.config, console)
+    if config is None:
         return 1
 
-    rows = []
-    for provider in config.providers:
-        key = provider.api_key()
-        rows.append(
-            [
-                provider.name,
-                provider.kind,
-                provider.model,
-                "yes" if key else ("local" if provider.is_local else "MISSING"),
-                "on" if provider.enabled else "off",
-            ]
+    console.title("Providers")
+    usable = [p for p in config.providers if p.is_configured()]
+    rows = [
+        (
+            p.name,
+            p.kind,
+            p.model,
+            "key ✓" if p.is_configured() else "no key",
+            "on" if p.enabled else "off",
         )
-    console.write(console.title("Configured providers"))
-    console.write(console.table(["name", "kind", "model", "key", "enabled"], rows))
+        for p in config.providers
+    ]
+    console.table(("provider", "kind", "model", "key", "state"), rows)
+    console.write()
+    console.write(f"fallback order: {console.paint(' → '.join(p.name for p in usable) or '—', DIM)}")
 
-    usable = config.ordered_providers()
-    console.write("")
     if not usable:
-        console.write(console.fail("no usable provider — add a key to .env"))
-        return 1
-    console.write(console.ok("order: " + " → ".join(provider.name for provider in usable)))
+        console.write()
+        console.warn("no usable provider", "add a key to .env (see .env.example)")
+    elif args.live:
+        console.write()
+        console.title("Live check (one tiny request each)")
+        asyncio.run(_live_check(config, console))
+    else:
+        console.write(f"{console.paint('· --live tries each provider for real', DIM)}")
+    return 0 if usable else 1
 
-    if args.live:
-        return asyncio.run(_ping_providers(config))
-    console.write(console.info("\nadd --live to actually call them (uses your free quota)"))
-    return 0
 
-
-async def _ping_providers(config) -> int:
+async def _live_check(config: AppConfig, console: Console) -> None:
     import time
 
-    from atlas_mind.providers.factory import build_provider
+    from atlas_core.contracts import LlmRequest, Message, Role, TextDelta
+    from atlas_mind import build_providers
 
-    console.write("")
-    console.write(console.title("Live check (one tiny prompt each)"))
-    any_ok = False
-    for provider_config in config.ordered_providers():
-        provider = build_provider(provider_config)
-        started = time.perf_counter()
-        try:
-            health = await provider.health()
-            if not health.ok:
-                console.write(console.warn(f"{provider.name:<14} health: {health.detail}"))
-            text = ""
-            from atlas_core.contracts import LlmRequest, Message, Role, TextDelta
-
-            request = LlmRequest(
-                messages=[Message(role=Role.USER, content="goul 'salam' f kelma wa7da")],
-                max_output_tokens=16,
-            )
-            async for event in provider.stream(request):
-                if isinstance(event, TextDelta):
-                    text += event.text
-                    if len(text) > 40:
-                        break
-            ttft = (time.perf_counter() - started) * 1000
-            any_ok = True
-            console.write(
-                console.ok(f"{provider.name:<14} {ttft:6.0f} ms → {text.strip()[:40] or '(empty)'}")
-            )
-        except Exception as exc:
-            console.write(console.fail(f"{provider.name:<14} {type(exc).__name__}: {str(exc)[:110]}"))
-        finally:
-            close = getattr(provider, "aclose", None)
-            if close:
-                await close()
-    return 0 if any_ok else 1
-
-
-def cmd_chat(args: argparse.Namespace) -> int:
-    config, error = _load_config()
-    if error or config is None:
-        console.write(console.fail(f"config error: {error}"))
-        return 1
-    return asyncio.run(_chat_loop(config))
-
-
-async def _chat_loop(config) -> int:
-    from atlas_mind.chat import ChatSession
-
-    router, timings = _build_router(config)
-    session = ChatSession(config, router, timings=timings)
-
-    console.write(console.title("ATLAS") + console.info(f"  · {router.describe()}"))
-    console.write(
-        console.info("speak Darija or English · /help for commands · /quit to leave\n")
+    request = LlmRequest(
+        messages=[Message(role=Role.USER, content="Jaweb b 'salam' f kelma wa7da.")],
+        max_output_tokens=12,
     )
+    for provider in build_providers(config):
+        started = time.perf_counter()
+        first: float | None = None
+        text = ""
+        try:
+            async for event in provider.stream(request):
+                if isinstance(event, TextDelta) and event.text:
+                    first = first if first is not None else time.perf_counter()
+                    text += event.text
+                if len(text) > 40:
+                    break
+            total = (time.perf_counter() - started) * 1000
+            ttft = f"{(first - started) * 1000:.0f}ms" if first else "—"
+            console.ok(provider.name, f"ttft {ttft} · total {total:.0f}ms · {text.strip()[:40]!r}")
+        except Exception as exc:
+            reason = str(exc).splitlines()[0][:90]
+            console.fail(provider.name, reason)
+
+
+def cmd_chat(args: argparse.Namespace, console: Console) -> int:
+    config = _load(args.config, console)
+    if config is None:
+        return 1
+    try:
+        return asyncio.run(_chat_loop(config, console, once=args.once))
+    except KeyboardInterrupt:  # pragma: no cover - interactive
+        console.write()
+        console.write("bslama 👋")
+        return 0
+
+
+async def _chat_loop(config: AppConfig, console: Console, *, once: str = "") -> int:
+    from atlas_mind.chat import TurnResult
+
+    session, router, timings = _session(config, console)
+
+    console.title("ATLAS")
+    console.write(
+        console.paint(
+            f"brain: {router.describe()} · language: {config.app.language} "
+            f"(secondary {config.app.secondary_language})",
+            DIM,
+        )
+    )
+    console.write(console.paint("type /help for commands, /quit to leave", DIM))
+    console.write()
 
     while True:
-        try:
-            text = await asyncio.to_thread(input, console.paint("you ▸ ", console.CYAN))
-        except (EOFError, KeyboardInterrupt):
-            console.write("\n" + console.info("b slama 👋"))
-            return 0
+        if once:
+            utterance = once
+        else:
+            try:
+                utterance = console.ask("you ▸ ")
+            except (EOFError, KeyboardInterrupt):
+                console.write()
+                return 0
 
-        text = text.strip()
+        text = utterance.strip()
         if not text:
             continue
         if text.startswith("/"):
-            if _handle_command(text, session, timings) == "quit":
-                return 0
-            continue
+            if _command(text, session, router, timings, console):
+                continue
+            return 0
 
-        from atlas_mind.chat import TurnResult
-
-        console.write(console.paint("atlas ▸ ", console.MAGENTA))
         result = TurnResult()
+        console.write(f"{console.paint('atlas ▸', CYAN)} ", end="")
         async for delta in session.stream(text, _result=result):
-            console.stream(delta)   # speak-while-thinking: print tokens as they arrive
-        console.write("")
-        if result.ttft_ms is not None:
-            console.write(
-                console.info(
-                    f"        [{result.provider} · ttft {result.ttft_ms:.0f} ms · total {result.total_ms:.0f} ms · {result.language}]"
-                )
-            )
+            console.write(delta, end="")
+        console.write()
+        _print_meta(result, console)
+        if once:
+            return 0
 
 
-def _handle_command(text: str, session, timings) -> str | None:
-    from atlas_mind.dialects import PACKS
+def _print_meta(result, console: Console) -> None:
+    """One honest line under every reply: who answered, how fast, in what language."""
+    if result.ttft_ms is None:
+        console.write()
+        return
+    meta = (
+        f"[{result.provider or 'canned'} · ttft {result.ttft_ms:.0f}ms · "
+        f"total {result.total_ms:.0f}ms · {result.language}]"
+    )
+    console.write(console.paint("  " + meta, DIM))
+    console.write()
 
-    command, _, argument = text.partition(" ")
-    if command in ("/quit", "/exit"):
-        console.write(console.info("b slama 👋"))
-        return "quit"
+
+def _command(text: str, session, router, timings, console: Console) -> bool:
+    """Handle a /command. Returns False when the loop should end."""
+    parts = text.split()
+    command, rest = parts[0].lower(), parts[1:]
+
+    if command in {"/quit", "/exit", "/bye"}:
+        console.write("bslama 👋")
+        return False
     if command == "/help":
-        console.write(
-            console.table(
-                ["command", "what"],
-                [
-                    ["/help", "this list"],
-                    ["/lang <ar-MA|en-GB>", "switch language explicitly"],
-                    ["/reset", "forget the conversation window"],
-                    ["/timing", "p50/p95 latency summary"],
-                    ["/providers", "who is configured and who answered last"],
-                    ["/context", "how the token budget was spent"],
-                    ["/quit", "leave"],
-                ],
-            )
+        console.table(
+            ("command", "what it does"),
+            [
+                ("/lang <ar-MA|en-GB>", "switch language now"),
+                ("/reset", "forget this conversation"),
+                ("/timing", "latency of the last turns"),
+                ("/providers", "who can answer right now"),
+                ("/quit", "leave"),
+            ],
         )
     elif command == "/lang":
-        target = argument.strip() or "ar-MA"
-        if target not in PACKS:
-            console.write(console.warn(f"unknown language {target!r}; use one of {', '.join(PACKS)}"))
+        if not rest:
+            console.write(f"language is {session.current_language}")
+        elif rest[0] not in {"ar-MA", "en-GB"}:
+            console.warn("unknown language", "use ar-MA or en-GB")
         else:
-            session.language.route("", hint=target)
-            console.write(console.ok(f"language → {PACKS[target].label}"))
+            session.language.route("", hint=rest[0])
+            console.write(f"language {session.current_language}")
     elif command == "/reset":
         session.reset()
-        console.write(console.ok("conversation reset"))
+        console.write("conversation cleared")
     elif command == "/timing":
-        console.write(timings.format_summary())
+        console.write(timings.format_summary() if timings else "no timings recorded yet")
     elif command == "/providers":
-        console.write(console.info("order: " + session.router.describe()))
-        console.write(console.info(f"last answered by: {session.router.last_provider or '(none yet)'}"))
-        for name, quota in session.router.quotas().items():
-            console.write(
-                console.info(
-                    f"  {name}: {quota.used_today} today"
-                    + (f" / cap {quota.daily_cap}" if quota.daily_cap else "")
-                )
-            )
-    elif command == "/context":
-        console.write(console.info(str(session.context.last_build or "nothing built yet")))
+        console.write(router.describe())
     else:
-        console.write(console.warn(f"unknown command {command!r} — try /help"))
+        console.warn("unknown command", f"{command} — try /help")
+    return True
+
+
+def _find_template(explicit: str | None = None) -> Path | None:
+    """Locate vault-template/: --template, $ATLAS_VAULT_TEMPLATE, repo, cwd."""
+    import os
+
+    candidates = [
+        explicit,
+        os.environ.get("ATLAS_VAULT_TEMPLATE"),
+        "vault-template",
+        str(Path(__file__).resolve().parents[4] / "vault-template"),
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_dir():
+            return Path(candidate)
     return None
 
 
-def cmd_vault(args: argparse.Namespace) -> int:
+def cmd_vault(args: argparse.Namespace, console: Console) -> int:
+    config = _load(args.config, console)
+    if config is None:
+        return 1
+
     from atlas_core.config import ObsidianSection
-    from atlas_core.errors import VaultError
     from atlas_obsidian import VaultAdapter
 
-    config, _error = _load_config()
-
-    if args.action == "init":
-        if not args.path:
-            console.write(console.fail("usage: python -m atlas vault init <path>"))
+    if args.vault_action == "init":
+        target = Path(args.path or args.vault_path or "").expanduser()
+        if not args.path and not args.vault_path:
+            console.fail("vault init", "tell me where: atlas vault init ~/AtlasVault")
             return 1
-        template = REPO_ROOT / "vault-template"
-        adapter = VaultAdapter.init_from_template(args.path, template, git=not args.no_git)
-        console.write(console.ok(f"vault ready at {adapter.root}"))
-        console.write(console.info("add this to .env:  ATLAS_VAULT_PATH=" + str(adapter.root)))
-        console.write(console.info("then open it in Obsidian as a vault"))
+        template = _find_template(args.template)
+        if template is None:
+            console.fail("vault init", "vault-template/ not found")
+            console.write(f"  {console.paint('→ run from the repo root, or --template <path>', DIM)}")
+            return 1
+
+        adapter = VaultAdapter.init_from_template(target, template, git=not args.no_git)
+        console.title("Vault")
+        console.ok("created", str(target))
+        console.write(f"  from {template} · git: {'yes' if not args.no_git else 'no'}")
+        console.write()
+        console.write(f"  {console.paint('next:', DIM)} set vault_path = \"{target}\" in config.toml")
+        console.write(f"  {console.paint('then:', DIM)} atlas vault status")
         return 0
 
-    vault_path = (
-        getattr(args, "vault_path", None)
-        or args.path
-        or (config.obsidian.vault_path if config else "")
-    )
+    vault_path = args.vault_path or args.path or config.obsidian.vault_path
     if not vault_path:
-        console.write(console.fail("no vault configured — python -m atlas vault init <path>"))
+        console.warn("no vault configured", "atlas vault init ~/AtlasVault")
         return 1
-    adapter = VaultAdapter(ObsidianSection(vault_path=str(vault_path)))
 
-    if args.action == "status":
-        try:
-            stats = adapter.stats()
-        except VaultError as exc:
-            console.write(console.fail(str(exc)))
+    adapter = VaultAdapter(
+        ObsidianSection(vault_path=str(Path(vault_path).expanduser()), git_commit_writes=True)
+    )
+
+    if args.vault_action == "status":
+        if not adapter.exists:
+            console.fail("vault", f"not found: {vault_path}")
             return 1
-        console.write(console.title("Vault"))
-        console.write(console.table(["key", "value"], [[k, str(v)] for k, v in stats.items()]))
+        console.title("Vault")
+        console.table(("key", "value"), [(k, str(v)) for k, v in adapter.stats().items()])
         recent = adapter.recent_notes(5)
         if recent:
-            console.write("")
-            console.write(console.info("recent: " + ", ".join(note.title for note in recent)))
+            console.write()
+            console.write(f"recent: {', '.join(note.title for note in recent)}")
         return 0
 
-    if args.action == "undo":
-        undone = adapter.undo_last_write()
-        console.write(console.ok("reverted the last vault write") if undone else console.warn("nothing to undo"))
-        return 0 if undone else 1
+    if args.vault_action == "undo":
+        if adapter.undo_last_write():
+            console.ok("undo", "last Atlas write reverted")
+            return 0
+        console.warn("undo", "nothing to undo")
+        return 1
 
-    if args.action == "log":
-        for line in adapter.journal.log(limit=args.limit):
-            console.write(console.info(line))
-        return 0
-
-    console.write(console.fail(f"unknown vault action {args.action!r}"))
+    console.fail("vault", f"unknown action {args.vault_action!r}")
     return 1
 
 
-def cmd_skills(args: argparse.Namespace) -> int:
-    from atlas_core.config import ObsidianSection
-    from atlas_obsidian import VaultAdapter
+def cmd_skills(args: argparse.Namespace, console: Console) -> int:
+    import time
+
     from atlas_skills import (
         OpenUrlSkill,
-        RememberSkill,
         ShutdownSkill,
         SkillRegistry,
         SystemStatsSkill,
     )
 
     registry = SkillRegistry()
-    if args.action == "audit":
-        registry.audit_tail()
-        console.write(console.info("(audit is populated while Atlas runs; empty in a fresh CLI)"))
+    for built in (SystemStatsSkill(), OpenUrlSkill(), ShutdownSkill()):
+        registry.register(built)
+    if args.skills_action == "audit":
+        console.title("Skill audit")
+        rows = registry.audit_tail(args.limit)
+        if not rows:
+            console.write("nothing called yet")
+        else:
+            console.table(
+                ("when", "skill", "ok", "spoken"),
+                [
+                    (
+                        time.strftime("%H:%M:%S", time.localtime(entry.at)),
+                        entry.skill,
+                        "✓" if entry.ok else "✗",
+                        entry.spoken[:40],
+                    )
+                    for entry in rows
+                ],
+            )
         return 0
 
-    vault = None
-    config, _error = _load_config()
-    if config and config.obsidian.vault_path:
-        vault = VaultAdapter(ObsidianSection(vault_path=config.obsidian.vault_path))
-
-    registry.register(SystemStatsSkill())
-    registry.register(OpenUrlSkill())
-    registry.register(ShutdownSkill())
-    if vault is not None:
-        registry.register(RememberSkill(vault))
-
-    rows = [
-        [skill.name, skill.permission.value, "owner only" if skill.owner_only else ""]
-        for skill in sorted(registry._skills.values(), key=lambda s: s.name)
-    ]
-    console.write(console.title("Skills"))
-    console.write(console.table(["skill", "permission", "restriction"], rows))
-    console.write("")
-    console.write(console.info(registry.describe("ar-MA")))
+    console.title("Skills")
+    skill_rows: list[tuple[str, str, str]] = []
+    for name in registry.names():
+        registered = registry.get(name)
+        skill_rows.append(
+            (
+                registered.name,
+                registered.permission.value,
+                "owner only" if registered.owner_only else "",
+            )
+        )
+    console.table(("skill", "permission", "restriction"), skill_rows)
+    console.write()
+    console.write(registry.describe("ar-MA"))
+    console.write()
+    console.write(console.paint("destructive skills ask first; a stranger never counts", DIM))
     return 0
 
 
-def cmd_ui_protocol(_args: argparse.Namespace) -> int:
+def cmd_ui_protocol(args: argparse.Namespace, console: Console) -> int:
     from atlas_ui import typescript
 
-    console.write(typescript())
+    typescript_text = typescript()
+    if args.out:
+        Path(args.out).write_text(typescript_text, encoding="utf-8")
+        console.ok("written", args.out)
+        return 0
+    console.write(typescript_text)
     return 0
 
 
-def cmd_listen(_args: argparse.Namespace) -> int:
-    console.write(console.warn("voice listening arrives in L2 (wake word + Darija ASR)."))
-    console.write(console.info("until then, use text: python -m atlas chat"))
-    console.write(console.info("check the microphone now with: python -m atlas doctor"))
+def cmd_version(args: argparse.Namespace, console: Console) -> int:
+    import platform
+
+    import atlas_core
+
+    console.write(
+        f"atlas {__version__} · atlas-core {atlas_core.__version__} · python {platform.python_version()}"
+    )
     return 0
 
 
-def cmd_version(_args: argparse.Namespace) -> int:
-    from atlas_core import __version__ as core_version
-
-    console.write(f"atlas {VERSION} · atlas-core {core_version} · python {sys.version.split()[0]}")
+def cmd_listen(args: argparse.Namespace, console: Console) -> int:
+    console.title("Listening")
+    console.warn("not yet", "the ear arrives in L2 (wake word, VAD, cloud ASR + local fallback)")
+    console.write(f"  {console.paint('what works now:', DIM)} atlas chat")
     return 0
+
+
+def cmd_health(args: argparse.Namespace, console: Console) -> int:
+    """Machine-readable doctor for scripts and the future UI."""
+    from atlas.doctor import run_checks
+
+    report = run_checks(config_path=args.config)
+    payload = {
+        "ok": not report.failures,
+        "checks": [
+            {"name": c.name, "status": c.status, "detail": c.detail, "hint": c.hint}
+            for c in report.checks
+        ],
+    }
+    console.write(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if not report.failures else 1
 
 
 # ── argument parsing ─────────────────────────────────────────────────
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="atlas",
-        description="ATLAS — voice-first Darija/English assistant for this PC",
+        description="Atlas — a Darija-speaking assistant that lives in your PC.",
+        epilog=USAGE_HINT,
     )
+    parser.add_argument("--config", help="path to config.toml (or set ATLAS_CONFIG)")
+    parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("doctor", help="check hardware, config, keys, vault and audio").set_defaults(func=cmd_doctor)
+    doctor = sub.add_parser("doctor", help="is this machine ready for Atlas?")
+    doctor.set_defaults(func=cmd_doctor)
 
-    providers = sub.add_parser("providers", help="list configured LLM providers")
+    health = sub.add_parser("health", help="doctor as JSON (for scripts)")
+    health.set_defaults(func=cmd_health)
+
+    providers = sub.add_parser("providers", help="configured brains and their keys")
     providers.add_argument("--live", action="store_true", help="actually call each provider")
     providers.set_defaults(func=cmd_providers)
 
-    sub.add_parser("chat", help="text conversation with Atlas (L1)").set_defaults(func=cmd_chat)
+    chat = sub.add_parser("chat", help="talk to Atlas")
+    chat.add_argument("--once", default="", metavar="TEXT", help="send one message and exit")
+    chat.set_defaults(func=cmd_chat)
 
-    vault = sub.add_parser("vault", help="Obsidian vault management")
-    vault.add_argument("action", choices=["init", "status", "undo", "log"])
-    vault.add_argument("path", nargs="?", help="vault path (for init)")
-    vault.add_argument("--vault", dest="vault_path", help="vault path for status/log/undo")
-    vault.add_argument("--no-git", action="store_true", help="skip git init (no undo support)")
-    vault.add_argument("--limit", type=int, default=20)
+    vault = sub.add_parser("vault", help="the Obsidian second brain")
+    vault.add_argument("vault_action", choices=["init", "status", "undo"])
+    vault.add_argument("path", nargs="?", help="vault path (init) or existing vault")
+    vault.add_argument("--vault", dest="vault_path", help="existing vault path")
+    vault.add_argument("--template", help="path to vault-template/")
+    vault.add_argument("--no-git", action="store_true", help="skip git history for the vault")
     vault.set_defaults(func=cmd_vault)
 
-    skills = sub.add_parser("skills", help="list skills and their permissions")
-    skills.add_argument("action", nargs="?", choices=["list", "audit"], default="list")
+    skills = sub.add_parser("skills", help="what Atlas can do, and who may ask")
+    skills.add_argument("skills_action", nargs="?", default="list", choices=["list", "audit"])
+    skills.add_argument("--limit", type=int, default=20)
     skills.set_defaults(func=cmd_skills)
 
-    sub.add_parser("ui-protocol", help="print the generated orb protocol").set_defaults(func=cmd_ui_protocol)
-    sub.add_parser("listen", help="voice mode (arrives in L2)").set_defaults(func=cmd_listen)
-    sub.add_parser("version", help="print versions").set_defaults(func=cmd_version)
-    parser.add_argument("--verbose", "-v", action="store_true", help="show debug logging")
+    ui = sub.add_parser("ui-protocol", help="generate the TypeScript UI contract")
+    ui.add_argument("--out", help="write to a file instead of stdout")
+    ui.set_defaults(func=cmd_ui_protocol)
+
+    version = sub.add_parser("version", help="versions of the pieces")
+    version.set_defaults(func=cmd_version)
+
+    listen = sub.add_parser("listen", help="wake word + listening (L2)")
+    listen.set_defaults(func=cmd_listen)
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    args = build_parser().parse_args(argv)
+    console = Console()
 
+    # Logging is off by default: the CLI already reports what happened, in
+    # Darija, under each reply.  -v is for when something needs explaining.
     from atlas_core.logging import setup_logging
 
-    setup_logging("DEBUG" if getattr(args, "verbose", False) else "WARNING", log_dir=None)
+    if getattr(args, "verbose", False):
+        setup_logging(level="DEBUG", log_dir="logs")
+    else:
+        setup_logging(level="ERROR")
     try:
-        return int(args.func(args))
-    except KeyboardInterrupt:
-        console.write("\n" + console.info("interrupted"))
+        return args.func(args, console)
+    except KeyboardInterrupt:  # pragma: no cover - interactive
+        console.write()
         return 130
+    except Exception as exc:
+        console.fail("error", f"{type(exc).__name__}: {exc}")
+        if getattr(args, "verbose", False):
+            raise
+        console.write(f"  {console.paint('→ rerun with -v for the traceback', DIM)}")
+        return 1
 
 
-__all__ = ["build_parser", "main"]
+if __name__ == "__main__":  # pragma: no cover
+    sys.exit(main())

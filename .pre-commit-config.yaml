@@ -1,0 +1,53 @@
+# Fast local gates. CI repeats all of them, so a missing hook can never let
+# something through — this just saves you the round trip.
+#
+#   pre-commit install
+#   pre-commit run --all-files
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-toml
+      - id: check-yaml
+      - id: check-added-large-files
+        args: ["--maxkb=2048"]  # models belong in %LOCALAPPDATA%\atlas\models
+      - id: detect-private-key
+      - id: check-merge-conflict
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.9
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+        files: ^(packages|apps|scripts)/
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      # The same four gates CI runs, in the same order: they fail fast and they
+      # protect design rules (layering, no PyTorch, no copy-paste) rather than
+      # style, so a red hook means something real.
+      - id: atlas-import-rules
+        name: atlas · layer rules
+        entry: python scripts/check_import_rules.py
+        language: system
+        pass_filenames: false
+        files: ^(packages|apps)/.*\.py$
+      - id: atlas-no-torch
+        name: atlas · torch-free core
+        entry: python scripts/check_no_torch.py
+        language: system
+        pass_filenames: false
+        files: ^(packages|apps)/.*\.(py|toml)$
+      - id: atlas-duplicates
+        name: atlas · no duplicated code
+        entry: python scripts/check_duplicates.py
+        language: system
+        pass_filenames: false
+        files: ^(packages|apps)/.*\.py$

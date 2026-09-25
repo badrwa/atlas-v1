@@ -10,10 +10,11 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncIterator, Iterator
-from typing import Any
+from typing import Any, ClassVar
 
 from atlas_core.contracts import (
     AudioChunk,
+    DeclaredSkill,
     Detection,
     HealthReport,
     LlmEvent,
@@ -23,7 +24,6 @@ from atlas_core.contracts import (
     QuotaState,
     ResourceCost,
     Sense,
-    Skill,
     SkillContext,
     SkillResult,
     SpeakerMatch,
@@ -34,7 +34,6 @@ from atlas_core.contracts import (
     StructuredResult,
     TextDelta,
     ToolCallRequest,
-    ToolSpec,
     Transcript,
     WakeWordEngine,
 )
@@ -144,15 +143,19 @@ class FakeWake(WakeWordEngine):
         return Detection()
 
 
-class FakeRecognizer(SpeechRecognizer):
-    name = "fake-asr"
+class FakeEngineMixin:
+    """The engine lifecycle every fake shares: load, unload, is_loaded, cost_hint.
 
-    def __init__(self, text: str = "chno ljaw?", language: str = "ar-MA", cost_mb: int = 300) -> None:
-        self.text = text
-        self.language = language
+    Real engines do not share this — an ONNX session and an HTTP client have
+    genuinely different lifecycles — but all three fakes model the *same
+    contract*, so writing it three times would be three copies of one idea.
+    """
+
+    _cold_start_s: float = 1.0
+
+    def _init_engine(self, cost_mb: int) -> None:
         self._loaded = False
         self._cost_mb = cost_mb
-        self.transcribe_calls = 0
 
     async def load(self) -> None:
         self._loaded = True
@@ -164,7 +167,17 @@ class FakeRecognizer(SpeechRecognizer):
         return self._loaded
 
     def cost_hint(self) -> ResourceCost:
-        return ResourceCost(ram_mb=self._cost_mb, cold_start_s=1.0)
+        return ResourceCost(ram_mb=self._cost_mb, cold_start_s=self._cold_start_s)
+
+
+class FakeRecognizer(FakeEngineMixin, SpeechRecognizer):
+    name = "fake-asr"
+
+    def __init__(self, text: str = "chno ljaw?", language: str = "ar-MA", cost_mb: int = 300) -> None:
+        self.text = text
+        self.language = language
+        self.transcribe_calls = 0
+        self._init_engine(cost_mb)
 
     async def transcribe(
         self, audio: bytes, *, language: str = "unknown", sample_rate: int = 16_000
@@ -179,50 +192,27 @@ class FakeRecognizer(SpeechRecognizer):
         )
 
 
-class FakeSynthesizer(SpeechSynthesizer):
+class FakeSynthesizer(FakeEngineMixin, SpeechSynthesizer):
     name = "fake-tts"
+    _cold_start_s = 0.5
 
     def __init__(self, cost_mb: int = 120) -> None:
-        self._loaded = False
-        self._cost_mb = cost_mb
         self.spoken: list[str] = []
-
-    async def load(self) -> None:
-        self._loaded = True
-
-    async def unload(self) -> None:
-        self._loaded = False
-
-    def is_loaded(self) -> bool:
-        return self._loaded
-
-    def cost_hint(self) -> ResourceCost:
-        return ResourceCost(ram_mb=self._cost_mb, cold_start_s=0.5)
+        self._init_engine(cost_mb)
 
     def synthesize(self, text: str, *, voice: str = "", language: str = "ar-MA") -> Iterator[AudioChunk]:
         self.spoken.append(text)
         yield AudioChunk(pcm=b"\x00\x01" * 32, final=True)
 
 
-class FakeVerifier(SpeakerVerifier):
+class FakeVerifier(FakeEngineMixin, SpeakerVerifier):
     name = "fake-speaker"
+    _cold_start_s = 0.4
 
     def __init__(self, owner: bool = True, score: float = 0.91) -> None:
         self.owner = owner
         self.score = score
-        self._loaded = False
-
-    async def load(self) -> None:
-        self._loaded = True
-
-    async def unload(self) -> None:
-        self._loaded = False
-
-    def is_loaded(self) -> bool:
-        return self._loaded
-
-    def cost_hint(self) -> ResourceCost:
-        return ResourceCost(ram_mb=90, cold_start_s=0.4)
+        self._init_engine(90)
 
     def embed(self, audio: bytes, *, sample_rate: int = 16_000) -> list[float]:
         return [0.1, 0.2, 0.3]
@@ -234,9 +224,12 @@ class FakeVerifier(SpeakerVerifier):
 
 
 # ── skills ───────────────────────────────────────────────────────────
-class FakeSkill(Skill):
+class FakeSkill(DeclaredSkill):
     name = "fake_skill"
     permission = Permission.SAFE
+    description = "a fake skill for tests"
+    description_darija = "مهارة تجريبية"
+    parameters: ClassVar[dict[str, Any]] = {"type": "object", "properties": {}}
 
     def __init__(
         self, result: SkillResult | None = None, *, permission: Permission | None = None
@@ -247,15 +240,6 @@ class FakeSkill(Skill):
             self.permission = permission
         self.result = result or SkillResult(ok=True, spoken="safi", data={"echo": True})
         self.calls: list[tuple[dict[str, Any], SkillContext]] = []
-
-    def spec(self) -> ToolSpec:
-        return ToolSpec(
-            name=self.name,
-            description="a fake skill for tests",
-            description_darija="مهارة تجريبية",
-            parameters={"type": "object", "properties": {}},
-            permission=self.permission,
-        )
 
     def invoke(self, args: dict[str, Any], ctx: SkillContext) -> SkillResult:
         self.calls.append((args, ctx))

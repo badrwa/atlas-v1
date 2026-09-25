@@ -15,7 +15,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, ClassVar, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
@@ -303,6 +303,28 @@ class Skill(ABC):
 
     @abstractmethod
     def invoke(self, args: dict[str, Any], ctx: SkillContext) -> SkillResult: ...
+
+
+class DeclaredSkill(Skill):
+    """A skill that describes itself with plain class attributes.
+
+    Skills differ in *what they do*, not in how they announce themselves.  Without
+    this, every capability repeats the same `spec()` body — and a tool schema is
+    exactly the thing that drifts out of sync once it is copy-pasted.
+    """
+
+    description: str = ""
+    description_darija: str = ""
+    parameters: ClassVar[dict[str, Any]] = {}
+
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name=self.name,
+            description=self.description,
+            description_darija=self.description_darija,
+            parameters=dict(self.parameters),
+            permission=self.permission,
+        )
 
 
 class Store(ABC):

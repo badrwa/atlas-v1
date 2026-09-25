@@ -18,7 +18,7 @@ Speaks **Moroccan Darija** by default and **British English** second · knows yo
 
 | Level | Name | State |
 |---|---|---|
-| L0 | Foundation (workspace, contracts, DI, events, FSM, CI) | not started |
+| L0 | Foundation (workspace, contracts, DI, events, FSM, CI) | **done — see [NOTES-L00](docs/levels/NOTES-L00.md)** |
 | L1 | Brain (text Darija + en-GB, providers, persona, timings) | not started |
 | L2 | Ears (wake word, VAD, ASR cloud + local Darija) | not started |
 | L3 | Mouth (Piper en-GB, DarijaTTS, cache, prosody) | not started |
@@ -29,6 +29,26 @@ Speaks **Moroccan Darija** by default and **British English** second · knows yo
 | L8 | Soul (friend voice, dialect packs, humour, mood) | not started |
 | L9 | Growth (GitHub study loop, own packages, HF artifacts) | not started |
 | L10 | Residency (autostart, watchdogs, governor, soak) | not started |
+
+## Run it
+
+```bash
+uv sync --all-packages          # or: pip install -e packages/* -e apps/atlas
+cp .env.example .env            # add your keys (Gemini first: aistudio.google.com/apikey)
+python -m atlas doctor          # what works on this machine, honestly
+python -m atlas chat            # talk to it — Darija by default, /help for commands
+```
+
+A fresh clone with no keys still runs: `doctor` reports what is missing, and
+`chat` answers with one honest sentence instead of silence. Nothing pretends to
+work before its level lands — `atlas listen` says the ear arrives in L2.
+
+What is real today: the kernel (`atlas-core`: contracts, event bus, FSM, leases,
+timings, config, fakes), the brain (`atlas-mind`: seven providers, quota/retry/
+timing chain, Darija normalisation, lexicon, dialect packs, persona, streaming
+chat), the vault writer (`atlas-obsidian`: git-journaled, undoable), the skill
+registry with an owner gate, and the CLI. 181 tests, ruff + mypy + duplicate-code
+and architecture checks in CI.
 
 ## Ground rules
 

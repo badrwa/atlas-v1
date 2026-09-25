@@ -1,7 +1,9 @@
-"""`atlas doctor` — the first command you run, and the one you re-run forever.
+"""`atlas doctor` — the honest state of this machine.
 
-Every check answers three questions: does it work, what exactly is missing, and
-what do I type to fix it.  Exit code is 0 unless something is genuinely broken.
+The rule: a check may only report what it measured.  No microphone installed is
+a *warning* with the level where it gets fixed, not a failure; a missing
+provider key is a warning; a broken config is a failure.  Doctor must stay under
+three seconds and never require a network call, or nobody runs it.
 """
 
 from __future__ import annotations
@@ -9,300 +11,270 @@ from __future__ import annotations
 import os
 import platform
 import shutil
-import sys
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from atlas import console
-from atlas_core.config import AppConfig
+from atlas.console import GREEN, RED, YELLOW, Console
+from atlas_core.config import AppConfig, ConfigError, load_config
 
-OK, WARN, FAIL, SKIP = "ok", "warn", "fail", "skip"
-
-MIN_RAM_FREE_MB = 2000
-MIN_DISK_FREE_GB = 20
+OK = "ok"
+WARN = "warn"
+FAIL = "fail"
 
 
 @dataclass
-class CheckResult:
+class Check:
     name: str
     status: str
-    detail: str = ""
+    detail: str
     hint: str = ""
 
 
 @dataclass
-class DoctorReport:
-    results: list[CheckResult] = field(default_factory=list)
+class Report:
+    checks: list[Check] = field(default_factory=list)
 
-    def add(self, name: str, status: str, detail: str = "", hint: str = "") -> None:
-        self.results.append(CheckResult(name, status, detail, hint))
-
-    @property
-    def failures(self) -> int:
-        return sum(1 for result in self.results if result.status == FAIL)
+    def add(self, name: str, status: str, detail: str, hint: str = "") -> None:
+        self.checks.append(Check(name, status, detail, hint))
 
     @property
-    def warnings(self) -> int:
-        return sum(1 for result in self.results if result.status == WARN)
+    def failures(self) -> list[Check]:
+        return [c for c in self.checks if c.status == FAIL]
 
-    def render(self) -> str:
-        lines = [console.title("ATLAS doctor"), ""]
-        lines += [
-            console.status_line(result.name, result.status, result.detail, result.hint)
-            for result in self.results
-        ]
-        lines.append("")
-        summary = f"{len(self.results) - self.failures - self.warnings} ok · {self.warnings} warnings · {self.failures} failures"
-        lines.append(console.ok(summary) if not self.failures else console.fail(summary))
-        if self.failures:
-            lines.append(console.info("fix the failures above, then run `python -m atlas doctor` again"))
-        return "\n".join(lines)
+    @property
+    def warnings(self) -> list[Check]:
+        return [c for c in self.checks if c.status == WARN]
 
-
-# ── individual checks ────────────────────────────────────────────────
-def check_python(report: DoctorReport) -> None:
-    version = sys.version.split()[0]
-    arch = platform.machine()
-    bits = platform.architecture()[0]
-    if bits != "64bit":
-        report.add("Python", FAIL, f"{version} ({bits})", "install 64-bit Python 3.11/3.12 from python.org")
-        return
-    report.add("Python", OK, f"{version} · {arch} · {bits}")
-    if not os.environ.get("VIRTUAL_ENV") and ".venv" not in sys.executable:
-        report.add(
-            "virtualenv",
-            WARN,
-            "not running inside .venv",
-            "activate it first: .\\.venv\\Scripts\\Activate.ps1",
+    def counts(self) -> tuple[int, int, int]:
+        return (
+            sum(1 for c in self.checks if c.status == OK),
+            len(self.warnings),
+            len(self.failures),
         )
-    else:
-        report.add("virtualenv", OK, Path(sys.executable).parent.name)
 
 
-def check_hardware(report: DoctorReport) -> None:
+def _free_ram_mb() -> tuple[int, int] | None:
+    """Free and total RAM in MB, measured — psutil if present, else the OS."""
     try:
         import psutil
+
+        memory = psutil.virtual_memory()
+        return int(memory.available / 1024 / 1024), int(memory.total / 1024 / 1024)
     except ImportError:
-        report.add("RAM", SKIP, "psutil not installed", "pip install psutil")
-        return
-
-    memory = psutil.virtual_memory()
-    free_mb = int(memory.available / 1024 / 1024)
-    total_gb = memory.total / 1024**3
-    if free_mb < MIN_RAM_FREE_MB:
-        report.add(
-            "RAM",
-            FAIL,
-            f"{free_mb} MB free of {total_gb:.1f} GB",
-            "close heavy apps (Chrome, Teams) — Atlas needs ≥ 2 GB free to run local engines",
-        )
-    else:
-        report.add("RAM", OK, f"{free_mb} MB free of {total_gb:.1f} GB")
-
-    disk = shutil.disk_usage(Path.home())
-    free_gb = disk.free / 1024**3
-    status = OK if free_gb >= MIN_DISK_FREE_GB else WARN
-    report.add(
-        "disk (C:)",
-        status,
-        f"{free_gb:.0f} GB free",
-        "Atlas needs ~3 GB for a venv + models" if status != OK else "",
-    )
-
-    battery = psutil.sensors_battery()
-    if battery is not None:
-        state = "plugged in" if battery.power_plugged else "on battery"
-        status = OK if battery.power_plugged else WARN
-        report.add(
-            "power",
-            status,
-            f"{int(battery.percent)}% · {state}",
-            "always-on Atlas should stay plugged in (15 W CPU throttles on battery)",
-        )
-
-
-def check_audio(report: DoctorReport) -> None:
+        pass
+    if os.name == "nt":  # pragma: no cover - Windows only
+        return None
     try:
-        from atlas_audio import check_audio_stack
-    except ImportError:
-        report.add("audio", SKIP, "atlas-audio not installed")
+        fields: dict[str, int] = {}
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            key, _, rest = line.partition(":")
+            fields[key.strip()] = int(rest.strip().split()[0])
+        total = fields["MemTotal"] // 1024
+        free = (fields.get("MemAvailable", fields.get("MemFree", 0))) // 1024
+        return free, total
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def check_python(report: Report) -> None:
+    version = platform.python_version()
+    bits = platform.architecture()[0]
+    if bits != "64bit":
+        report.add("Python", FAIL, f"{version} ({bits})", "install 64-bit Python 3.11+")
         return
-
-    stack = check_audio_stack()
-    if not stack.sounddevice_available:
-        report.add(
-            "microphone",
-            SKIP,
-            "sounddevice not installed",
-            "L2 task: pip install 'atlas-audio[audio]'",
-        )
-        return
-    status = OK if stack.ok else WARN
-    report.add("microphone", status, stack.summary())
-    inputs = ", ".join(device.name for device in stack.inputs[:2])
-    if inputs:
-        report.add("audio devices", OK, inputs)
-    for problem in stack.problems:
-        report.add("audio problem", WARN, problem)
+    report.add("Python", OK, f"{version} ({bits}) on {platform.system()}")
 
 
-def check_config(report: DoctorReport, config: AppConfig | None) -> None:
-    if config is None:
-        report.add("config.toml", FAIL, "not loaded", "run from the repo root or set ATLAS_CONFIG")
+def check_hardware(report: Report) -> None:
+    ram = _free_ram_mb()
+    if ram is None:
+        report.add("RAM", WARN, "not measurable", "install psutil for an exact number")
+    else:
+        free, total = ram
+        detail = f"{free / 1024:.1f} GB free of {total / 1024:.1f} GB"
+        if free < 1500:
+            report.add("RAM", FAIL, detail, "close a browser tab — Atlas needs ~1.5 GB free")
+        elif free < 2048:
+            report.add("RAM", WARN, detail, "lean profile: cloud brain, small local models only")
+        else:
+            report.add("RAM", OK, detail)
+
+    try:
+        usage = shutil.disk_usage(Path.home())
+        free_gb = usage.free / 1024**3
+        if free_gb < 5:
+            report.add("disk", WARN, f"{free_gb:.1f} GB free", "models need ~2 GB (L2/L3)")
+        else:
+            report.add("disk", OK, f"{free_gb:.1f} GB free")
+    except OSError:
+        report.add("disk", WARN, "not measurable")
+
+
+def check_gpu(report: Report) -> None:
+    """This laptop has no usable AI accelerator. Say so, once, clearly."""
+    if platform.system() != "Windows":
+        report.add("GPU", OK, "not Windows — no GPU assumptions made")
         return
     report.add(
-        "config.toml",
+        "GPU",
         OK,
-        f"profile={config.app.profile} · language={config.app.language} · secondary={config.app.secondary_language}",
+        "CPU-only by design (HD 520 has no AI accelerator)",
+        "cloud brain + ONNX INT8 local models",
     )
 
 
-def check_providers(report: DoctorReport, config: AppConfig | None) -> None:
+def check_config(report: Report, config: AppConfig | None, error: str = "") -> None:
     if config is None:
+        report.add("config.toml", FAIL, error or "not found", "copy config.toml from the repo root")
         return
-    usable = config.ordered_providers()
-    enabled = [provider for provider in config.providers if provider.enabled]
+    report.add("config.toml", OK, f"profile={config.app.profile} language={config.app.language}")
 
-    if not usable:
+    configured = [p for p in config.providers if p.is_configured()]
+    if not configured:
         report.add(
-            "LLM providers",
-            FAIL,
-            "none usable",
-            "put a key in .env (see .env.example) — free tiers are enough",
+            "providers",
+            WARN,
+            f"0 of {len(config.providers)} have keys",
+            "chat falls back to a canned reply until a key is in .env",
         )
     else:
+        names = ", ".join(p.name for p in configured)
         report.add(
-            "LLM providers",
+            "providers",
             OK,
-            " → ".join(provider.name for provider in usable),
+            f"{len(configured)} of {len(config.providers)} have keys: {names}",
         )
 
-    for provider in enabled:
-        if provider.is_configured() or provider.is_local:
-            continue
-        report.add(
-            f"key: {provider.name}",
-            WARN,
-            f"{provider.api_key_env} missing",
-            f"add {provider.api_key_env}=... to .env (or disable the provider)",
-        )
-
-    # Specific, actionable hint for the Gemini key format.
-    gemini = next((provider for provider in config.providers if provider.kind == "gemini"), None)
-    if gemini is not None:
-        key = gemini.api_key()
-        if key and not key.startswith("AIza"):
+    # A key that is present but the wrong shape fails later, confusingly.
+    for provider in config.providers:
+        key = provider.api_key()
+        if provider.kind == "gemini" and key and not key.startswith("AIza"):
             report.add(
-                "gemini key format",
+                f"{provider.name} key",
                 WARN,
-                f"starts with {key[:3]!r}, expected 'AIza'",
-                "Google AI Studio API keys start with AIza… — an 'AQ.' value is an OAuth/CLI token "
-                "and will be rejected by the Gemini API. Get one at aistudio.google.com/apikey",
+                f"starts with {key[:3]!r} — that is not an AI Studio key",
+                "get one at aistudio.google.com/apikey (starts with AIza)",
             )
 
 
-def check_vault(report: DoctorReport, config: AppConfig | None) -> None:
-    if config is None:
+def check_vault(report: Report, config: AppConfig | None) -> None:
+    if config is None or not config.obsidian.vault_path:
+        report.add("vault", WARN, "not configured", "atlas vault init ~/AtlasVault")
         return
-    path = config.obsidian.vault_path
-    if not path:
-        report.add(
-            "Obsidian vault",
-            WARN,
-            "not configured (L6)",
-            "create one: python -m atlas vault init D:\\AtlasVault",
-        )
+    path = Path(config.obsidian.vault_path).expanduser()
+    if not path.is_dir():
+        report.add("vault", WARN, f"missing: {path}", "atlas vault init <path>")
         return
-
-    vault = Path(path)
-    if not vault.is_dir():
-        report.add("Obsidian vault", FAIL, f"{path} does not exist", "check ATLAS_VAULT_PATH or run vault init")
+    if not os.access(path, os.W_OK):
+        report.add("vault", FAIL, f"not writable: {path}")
         return
-
-    writable = os.access(vault, os.W_OK)
-    git_repo = (vault / ".git").exists()
-    detail = f"{path} · {'writable' if writable else 'READ-ONLY'} · git={'yes' if git_repo else 'no'}"
-    status = OK if (writable and git_repo) else WARN
-    hint = ""
-    if not writable:
-        hint = "Atlas cannot write memories here — pick a folder you own"
-    elif not git_repo:
-        hint = "no git repo: 'undo that' will not work — run git init in the vault"
-    report.add("Obsidian vault", status, detail, hint)
+    notes = sum(1 for _ in path.rglob("*.md"))
+    git = "git" if (path / ".git").exists() else "no git"
+    report.add("vault", OK, f"{notes} notes, {git}")
 
 
-def check_paths(report: DoctorReport) -> None:
-    for name, path in (("models dir", Path(os.environ.get("ATLAS_MODELS_DIR", "models"))),):
-        if path.exists():
-            report.add(name, OK, str(path))
-        else:
-            report.add(name, SKIP, f"{path} (created in L2)")
-
-
-def check_webview(report: DoctorReport) -> None:
-    """WebView2 ships with Windows 10/11 — verify before planning on it (L5)."""
-    if os.name != "nt":
-        report.add("WebView2", SKIP, "not Windows")
-        return
-    candidates = [
-        Path(os.environ.get("PROGRAMFILES(X86)", "C:/Program Files (x86)")) / "Microsoft/EdgeWebView/Application",
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft/EdgeWebView/Application",
-    ]
-    if any(candidate.exists() for candidate in candidates):
-        report.add("WebView2", OK, "installed (orb UI can use it in L5)")
-    else:
-        report.add(
-            "WebView2",
-            WARN,
-            "not found",
-            "install the Evergreen WebView2 runtime — needed for the orb UI (L5)",
-        )
-
-
-def check_import_rules(report: DoctorReport) -> None:
-    """The architecture's import rules, checked as a fact rather than a promise."""
+def check_audio(report: Report) -> None:
     try:
-        sys.path.insert(0, str(Path("scripts").resolve()))
-        from check_import_rules import find_violations  # type: ignore[import-not-found]
-
-        violations = find_violations(Path("packages"))
-        if violations:
-            report.add(
-                "import rules",
-                FAIL,
-                f"{len(violations)} violation(s)",
-                violations[0],
-            )
-        else:
-            report.add("import rules", OK, "no layer violations")
-    except Exception:
-        report.add("import rules", SKIP, "scripts/check_import_rules.py not found")
-
-
-CHECKS: list[Callable[..., None]] = [
-    check_python,
-    check_hardware,
-    check_audio,
-]
-
-CONFIG_CHECKS: list[Callable[..., None]] = [
-    check_config,
-    check_providers,
-    check_vault,
-]
+        from atlas_audio.devices import list_devices
+    except ImportError:
+        report.add("audio", WARN, "atlas-audio not installed")
+        return
+    microphones, speakers, host_apis = list_devices()
+    if not speakers and not microphones:
+        report.add(
+            "audio",
+            WARN,
+            "no devices visible",
+            "voice lands in L2 — pip install 'atlas-audio[audio]' to try it",
+        )
+        return
+    apis = f" · {', '.join(host_apis)}" if host_apis else ""
+    report.add("audio", OK, f"{len(microphones)} in, {len(speakers)} out{apis}")
 
 
-def run_checks(config: AppConfig | None = None) -> DoctorReport:
-    report = DoctorReport()
-    for check in CHECKS:
-        check(report)
-    for check in CONFIG_CHECKS:
-        check(report, config)
-    check_paths(report)
-    check_webview(report)
-    check_import_rules(report)
+def check_workspace(report: Report, config: AppConfig | None) -> None:
+    root = Path.cwd()
+    for name in ("data", "models", "logs"):
+        target = root / name
+        try:
+            target.mkdir(exist_ok=True)
+        except OSError as exc:
+            report.add(f"{name}/", FAIL, str(exc))
+            continue
+        report.add(f"{name}/", OK, str(target.relative_to(root)) if target.is_relative_to(root) else str(target))
+
+    if config is not None:
+        keywords = ", ".join(config.wake.keywords) or "—"
+        state = "enabled" if config.wake.enabled else "disabled"
+        report.add("wake word", OK, f"{keywords} ({state}, listens from L2)")
+
+
+def check_environment(report: Report) -> None:
+    """Secrets belong in .env; the repo must never contain them."""
+    env_file = Path(".env")
+    if not env_file.exists():
+        report.add(".env", WARN, "missing", "cp .env.example .env and add your keys")
+        return
+    keys = 0
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            _, _, value = stripped.partition("=")
+            if value.strip():
+                keys += 1
+    report.add(".env", OK, f"{keys} values set (never printed)")
+
+
+def run_checks(*, config_path: str | None = None) -> Report:
+    report = Report()
+    check_python(report)
+    check_hardware(report)
+    check_gpu(report)
+
+    config: AppConfig | None = None
+    error = ""
+    try:
+        config = load_config(config_path)
+    except ConfigError as exc:
+        error = str(exc)
+
+    check_config(report, config, error)
+    check_vault(report, config)
+    check_audio(report)
+    check_workspace(report, config)
+    check_environment(report)
     return report
 
 
-__all__ = ["MIN_DISK_FREE_GB", "MIN_RAM_FREE_MB", "DoctorReport", "run_checks"]
+def render(report: Report, console: Console, *, config_path: str | None = None) -> None:
+    console.title("ATLAS doctor")
+    console.write(console.paint(f"config: {config_path or 'config.toml'}", "\033[2m"))
+    console.write()
+    for check in report.checks:
+        if check.status == OK:
+            console.ok(check.name, check.detail)
+        elif check.status == WARN:
+            console.warn(check.name, check.detail)
+            if check.hint:
+                console.write(f"  {console.paint('→ ' + check.hint, YELLOW)}")
+        else:
+            console.fail(check.name, check.detail)
+            if check.hint:
+                console.write(f"  {console.paint('→ ' + check.hint, RED)}")
+
+    ok, warn, fail = report.counts()
+    console.write()
+    summary = f"{ok} ok · {warn} warnings · {fail} failures"
+    if fail:
+        console.write(console.paint(f"✗ {summary}", RED))
+    elif warn:
+        console.write(console.paint(f"✓ {summary}", YELLOW))
+    else:
+        console.write(console.paint(f"✓ {summary}", GREEN))
+
+    if fail:
+        console.write("Fix the ✗ rows first; Atlas will not start otherwise.")
+    elif warn:
+        console.write("Warnings are survivable — Atlas runs, with fewer capabilities.")
+    else:
+        console.write("Everything Atlas needs right now is in place.")

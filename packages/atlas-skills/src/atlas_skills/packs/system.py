@@ -9,17 +9,30 @@ from __future__ import annotations
 import logging
 import shutil
 import webbrowser
-from typing import Any
+from typing import Any, ClassVar
 from urllib.parse import urlparse
 
-from atlas_core.contracts import Permission, Skill, SkillContext, SkillResult, ToolSpec
+from atlas_core.contracts import DeclaredSkill, Permission, SkillContext, SkillResult
 
 log = logging.getLogger(__name__)
 
 ALLOWED_SCHEMES = ("http", "https")
 
 
-class SystemStatsSkill(Skill):
+def one_string_arg(name: str, description: str) -> dict[str, Any]:
+    """The most common tool schema in Atlas: exactly one required string.
+
+    Written once because four skills describing themselves the same way is how
+    a schema quietly drifts out of sync with its `invoke()`.
+    """
+    return {
+        "type": "object",
+        "properties": {name: {"type": "string", "description": description}},
+        "required": [name],
+    }
+
+
+class SystemStatsSkill(DeclaredSkill):
     """RAM / disk / battery — the numbers this laptop actually cares about."""
 
     name = "system_stats"
@@ -31,23 +44,18 @@ class SystemStatsSkill(Skill):
         self._disk = disk_probe or _shutil_disk
         self._battery = battery_probe or _psutil_battery
 
-    def spec(self) -> ToolSpec:
-        return ToolSpec(
-            name=self.name,
-            description="Report free RAM, disk space and battery level of this PC.",
-            description_darija="عطيني شحال باقي ميموار، ديسك، و لاباطري.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "what": {
-                        "type": "string",
-                        "enum": ["all", "ram", "disk", "battery"],
-                        "description": "which metric to report",
-                    }
-                },
-            },
-            permission=self.permission,
-        )
+    description = "Report free RAM, disk space and battery level of this PC."
+    description_darija = "عطيني شحال باقي ميموار، ديسك، و لاباطري."
+    parameters: ClassVar[dict[str, Any]] = {
+        "type": "object",
+        "properties": {
+            "what": {
+                "type": "string",
+                "enum": ["all", "ram", "disk", "battery"],
+                "description": "which metric to report",
+            }
+        },
+    }
 
     def invoke(self, args: dict[str, Any], ctx: SkillContext) -> SkillResult:
         what = str(args.get("what", "all"))
@@ -72,7 +80,7 @@ class SystemStatsSkill(Skill):
         return SkillResult(ok=True, spoken=" · ".join(parts), data=facts)
 
 
-class OpenUrlSkill(Skill):
+class OpenUrlSkill(DeclaredSkill):
     """Open a link in the default browser. Schema-constrained, so no surprises."""
 
     name = "open_url"
@@ -82,18 +90,9 @@ class OpenUrlSkill(Skill):
         self._open = opener or webbrowser.open
         self.opened: list[str] = []
 
-    def spec(self) -> ToolSpec:
-        return ToolSpec(
-            name=self.name,
-            description="Open an http/https URL in the default browser.",
-            description_darija="حل لينك ف لبراوزر.",
-            parameters={
-                "type": "object",
-                "properties": {"url": {"type": "string", "description": "http or https URL"}},
-                "required": ["url"],
-            },
-            permission=self.permission,
-        )
+    description = "Open an http/https URL in the default browser."
+    description_darija = "حل لينك ف لبراوزر."
+    parameters: ClassVar[dict[str, Any]] = one_string_arg("url", "http or https URL")
 
     def invoke(self, args: dict[str, Any], ctx: SkillContext) -> SkillResult:
         url = str(args.get("url", "")).strip()
@@ -111,7 +110,7 @@ class OpenUrlSkill(Skill):
         )
 
 
-class RememberSkill(Skill):
+class RememberSkill(DeclaredSkill):
     """Write a fact to the Obsidian vault (via the vault adapter, L6)."""
 
     name = "remember"
@@ -120,18 +119,9 @@ class RememberSkill(Skill):
     def __init__(self, vault) -> None:
         self.vault = vault
 
-    def spec(self) -> ToolSpec:
-        return ToolSpec(
-            name=self.name,
-            description="Save a durable fact about the owner into their notes.",
-            description_darija="سجل معلومة عليا ف النوطات.",
-            parameters={
-                "type": "object",
-                "properties": {"fact": {"type": "string", "description": "the fact, one sentence"}},
-                "required": ["fact"],
-            },
-            permission=self.permission,
-        )
+    description = "Save a durable fact about the owner into their notes."
+    description_darija = "سجل معلومة عليا ف النوطات."
+    parameters: ClassVar[dict[str, Any]] = one_string_arg("fact", "the fact, one sentence")
 
     def invoke(self, args: dict[str, Any], ctx: SkillContext) -> SkillResult:
         fact = str(args.get("fact", "")).strip()
@@ -145,7 +135,7 @@ class RememberSkill(Skill):
         )
 
 
-class ShutdownSkill(Skill):
+class ShutdownSkill(DeclaredSkill):
     """The canonical CONFIRM skill — destructive, owner-only, never silent."""
 
     name = "shutdown_pc"
@@ -155,14 +145,9 @@ class ShutdownSkill(Skill):
     def __init__(self, action=None) -> None:
         self._action = action or _noop_action
 
-    def spec(self) -> ToolSpec:
-        return ToolSpec(
-            name=self.name,
-            description="Shut the PC down (asks for spoken confirmation first).",
-            description_darija="طفي البيسي (كيطلب تأكيد قبل).",
-            parameters={"type": "object", "properties": {}},
-            permission=self.permission,
-        )
+    description = "Shut the PC down (asks for spoken confirmation first)."
+    description_darija = "طفي البيسي (كيطلب تأكيد قبل)."
+    parameters: ClassVar[dict[str, Any]] = {"type": "object", "properties": {}}
 
     def invoke(self, args: dict[str, Any], ctx: SkillContext) -> SkillResult:
         if ctx.dry_run:
