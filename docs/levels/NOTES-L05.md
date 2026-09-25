@@ -75,7 +75,8 @@ vocabularies where both are visible.
 
 | Check | Result |
 |---|---|
-| `pytest` | **651 passed** (581 → 651: +70 L5 tests) |
+| `pytest` (with the extras) | **651 passed** (581 → 651: +70 L5 tests) |
+| `pytest -m "not live and not hardware"` in a bare venv (CI, no extras) | **639 passed, 12 skipped** — the same command that was red since L4 |
 | `ruff check .` | clean |
 | `mypy packages apps` | **101 source files**, no issues |
 | `check_import_rules` / `check_no_torch` / `check_duplicates` | ✓ (`window=45 tokens`, 57 modules) |
@@ -119,7 +120,11 @@ vocabularies where both are visible.
 9. **The orb's asset checker only saw direct references.** `protocol.js` is loaded
    *by* `orb.js`, so the first version would have shipped a 404 on the import the
    browser makes. It now follows the real load graph.
-10. **A dead `data/ui-endpoint.json` hijacked the orb.** Written by a bridge that
+10. **Four tests assumed the `[local]` extra.** `pytest` in CI installs the
+    workspace without extras (that is the point: the core must not need numpy or
+    fastapi), and three L2 ASR tests plus one frames test imported numpy anyway.
+    They now `importorskip` — this had been making the whole CI job red since L4.
+11. **A dead `data/ui-endpoint.json` hijacked the orb.** Written by a bridge that
     was killed (Task Manager, power loss), it pointed at a port nobody owned.
     `_live_endpoint()` probes `/health` and ignores stale files; a crashed bridge
     cannot put a mute orb on your screen.

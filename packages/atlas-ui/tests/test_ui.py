@@ -586,6 +586,7 @@ def test_the_orb_handles_every_protocol_kind() -> None:
         assert f'case "{kind}":' in source, kind
 
 
+@pytest.mark.skipif(not bridge_available(), reason="needs uvicorn (the orb extra)")
 async def test_serve_advertises_itself_and_clears_the_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

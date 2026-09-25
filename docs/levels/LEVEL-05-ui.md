@@ -14,7 +14,7 @@
 > no framework), `atlas ui run|serve|status|protocol`, `atlas listen --ui`, the
 > `data/ui-endpoint.json` handshake that lets the window attach to a running
 > conversation, and the loop's own publishing (`_set_state` → `EventBus`).
-> Ten bugs the tests caught are in §4 — the three that matter: `socket: WebSocket`
+> Eleven bugs the tests caught are in §4 — the three that matter: `socket: WebSocket`
 > became a required query parameter under `from __future__ import annotations`
 > (every connection died with close code 1008); the window was created and never
 > started (invisible orb, no error); and `system.error` was in neither the

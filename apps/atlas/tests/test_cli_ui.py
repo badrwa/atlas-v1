@@ -145,6 +145,10 @@ def test_ui_serve_runs_the_bridge_and_stops(
     assert "__TOKEN__" not in str(seen["page"])
 
 
+@pytest.mark.skipif(
+    not __import__("atlas_ui.bridge", fromlist=["bridge_available"]).bridge_available(),
+    reason="needs fastapi + uvicorn",
+)
 def test_a_second_ui_run_refuses_to_open_a_twin(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -187,6 +191,10 @@ def test_a_second_ui_run_refuses_to_open_a_twin(
         child.wait(timeout=10)
 
 
+@pytest.mark.skipif(
+    not __import__("atlas_ui.bridge", fromlist=["bridge_available"]).bridge_available(),
+    reason="needs fastapi + uvicorn",
+)
 def test_ui_run_attaches_to_a_live_conversation(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

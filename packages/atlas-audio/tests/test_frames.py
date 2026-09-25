@@ -62,6 +62,9 @@ def test_pcm_roundtrip_pads_the_final_partial_frame():
 
 
 def test_bytes_and_numpy_helpers_agree():
+    # numpy is the `[local]` extra: the core install (CI) must not need it, so the
+    # test that proves the two helpers agree skips instead of failing there.
+    pytest.importorskip("numpy")
     frame = loud(1000)
     assert frame_from_bytes(frame_to_bytes(frame)) == frame
     assert rms(new_frame()) == 0.0

@@ -187,6 +187,7 @@ class FakeWhisperModel:
 
 
 async def test_local_whisper_decodes_off_the_event_loop_with_the_plan_s_settings():
+    pytest.importorskip("numpy")
     model = FakeWhisperModel([FakeSegment(" daba ", -0.1), FakeSegment("3ndi chwiya l3ba", -0.3)])
     recognizer = LocalWhisperRecognizer(
         "models/whisper-darija-ct2", model_factory=lambda: model, key="darija"
@@ -209,6 +210,7 @@ async def test_local_whisper_decodes_off_the_event_loop_with_the_plan_s_settings
 
 
 async def test_local_whisper_caps_a_runaway_buffer_and_clamps_confidence():
+    pytest.importorskip("numpy")
     model = FakeWhisperModel([FakeSegment("long", -5.0)], language="en")
     recognizer = LocalWhisperRecognizer("small.en", model_factory=lambda: model, language="en-GB", key="english")
     transcript = await recognizer.transcribe(pcm(60_000), language="en-GB")
@@ -309,6 +311,7 @@ async def test_the_cloud_is_skipped_when_the_wire_is_down():
 
 
 async def test_transcribe_falls_back_to_local_when_the_cloud_fails_mid_sentence():
+    pytest.importorskip("numpy")
     cloud = CloudRecognizer(gemini_key="gk", client=client(lambda _: httpx.Response(500)))
     local = LocalWhisperRecognizer("models/darija", model_factory=lambda: FakeWhisperModel([FakeSegment("fallback")]), key="darija")
     factory = RecognizerFactory(cloud=cloud, local_models={"local:darija": local})
